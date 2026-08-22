@@ -1,10 +1,15 @@
 # ESP32-P4 openvela 开发接力文档
 
-> 状态日期：2026-08-22（Asia/Shanghai）
+> 状态日期：2026-08-23（Asia/Shanghai）
 >
 > 交接目标：让新的 AI 工具无需依赖此前聊天记录，即可从正确 Git 基线继续开发，并保持相同的仓库边界、硬件证据、构建验证和 PR 质量。
 >
-> 当前阶段：Gate G1 已通过；CAM-002～CAM-004（SC2336 探测、流控、CSI-2 Host & D-PHY 硬件链路锁定）已完成并归档；AUD-001（ES8311 音频编解码器 + ESP32-P4 I2S0 底层驱动 + 板级功放使能 + `es8311_audio` CLI 测试套件）已全部实现并通过 nxstyle 与全量构建验证，对应独立 PR 已分别推送至双仓 Fork；等待后续实板联调；CAM-005（CSI DW-GDMA 取帧驱动）保留在 WIP 分支以便后续针对性深入调试。
+> 当前阶段：
+> 1. Gate G1 已通过；
+> 2. CAM-002～CAM-004（SC2336 探测、流控、CSI-2 Host & D-PHY 硬件链路锁定）已完成、合入并归档；
+> 3. AUD-001（ES8311 音频编解码器 + ESP32-P4 I2S0 底层驱动 + 板级功放使能 + `es8311_audio` CLI 测试套件）已合入团队仓，NuttX 驱动已进入统一主 PR #340；
+> 4. DISP-001（MIPI DSI 驱动 + D-PHY TX PLL + Framebuffer `/dev/fb0` + LVGL 9.1.0 演示 + `dsi_display` CLI 测试套件）已合入团队仓，NuttX 驱动已进入统一主 PR #340；
+> 5. 待后续板卡连接后执行 Audio 和 Display 的实板串口烟测；CAM-005（CSI DW-GDMA 取帧驱动）保留在 WIP 分支以便后续深入调试。
 >
 > 本文是当前状态和执行规则的入口；详细历史证据继续以 `PORTING_NOTES.md` 和 `hardware-logs/` 为准。
 
@@ -21,11 +26,10 @@
    `/dev/ttyACM*`，烧录和串口自动化通过 Windows Python/esptool 操作 COM3。
 6. Camera 子板通过 MIPI FPC 连接，内部 sensor 是 SC2336 (SCCB 0x30)。
 7. Audio 子系统：板载 Everest Semi ES8311 Codec (I2C0 0x18)，I2S0 (MCLK=GPIO13, BCLK=GPIO12, WS=GPIO10, DOUT=GPIO9, DIN=GPIO11)，板载功放 PA_EN=GPIO53。
-8. 团队专属仓和公共 `nuttx` 是两个独立 Git 仓、两个独立 PR 流程。绝不能在
-   一笔提交或一个 PR 中混合二者。
-9. 当前双仓 Audio PR 已推送：
-   - 公共 `nuttx`: `feat/esp32p4-i2s-audio` -> `open-vela/nuttx:feat/esp32p4-soc-contest2026`
-   - 团队仓: `feat/esp32p4-audio-es8311` -> `open-vela/contest2026_345_...:dev-ai-contest-2026`
+8. Display 子系统：MIPI DSI 2-lane (1000 Mbps/lane)，背光 LCD_BL=GPIO26，复位 LCD_RST=GPIO27，Framebuffer `/dev/fb0`，LVGL 9.1.0 演示与 `dsi_display` CLI。
+9. 团队专属仓和公共 `nuttx` 严格遵循 Git 规则：
+   - 公共 `nuttx`: 统一维护主 PR **`open-vela/nuttx#340`**（Head: `uleemos/nuttx:feat/esp32p4-soc-contest2026` -> Base: `open-vela/nuttx:dev-ai-contest-2026`）。
+   - 团队仓: 针对官方基线 `openvela/dev-ai-contest-2026` 提交独立 feature PR。
 10. 实板不在手边时的接力规则：所有代码和构建均需在仿真与 nxstyle 层面 100% 严谨闭环；硬件验证清单和测试命令必须详细记录，待板卡连接后按既定步骤执行并归档硬件日志。
 
 ## 1. 仓库与远端管理背景
@@ -833,20 +837,25 @@ SHA-256。不要只在聊天中报告 PASS。
 
 ## 14. 当前阶段与下一 AI 的建议首轮任务
 
-### 14.1 已完成项（截至 2026-08-19）
+### 14.1 已完成项（截至 2026-08-23）
 
-1. **CAM-002（已完成并落盘）**：
-   - 官方 SC2336 寄存器表来源固定为 `esp-video-components`（Commit `2e924b6` / `3620887`，Apache-2.0）。
-   - 完成硬件物理层、时钟、电平、HAL 依赖与 NutX video 接口审计，详见 `PORTING_NOTES.md` 第 13 节。
-2. **CAM-003（已完成代码、固件构建、真机串口验证与日志归档）**：
-   - 团队仓新增 `app/sc2336_probe/sc2336_tables.h`，重构 `sc2336_probe_main.c`。
-   - 支持只读探测、软复位、模式写表与校验、流控制（`stream-on`/`stream-off`）及流切换压力测试（支持 720p 30fps、1080p 30fps、1080p 25fps）。
-   - 真机串口测试通过（`sc2336_probe test 720p`、`sc2336_probe cycle 10 720p`、`sc2336_probe test 1080p`、`sc2336_probe cycle 10 1080p`、`sc2336_probe test 1080p25`、`sc2336_probe cycle 10 1080p25` 全通过）。
-   - 原始硬件日志已归档至 `hardware-logs/esp32p4-sc2336-control-smoke-2026-08-19.log`（SHA-256 `ef5306745452f58755b65bd013dfaee855ba9cb08790815b7d347cba37c82934`）。
+1. **CAM-002～CAM-004（SC2336 探测、流控、MIPI CSI 驱动，已合入）**：
+   - 官方 SC2336 寄存器表来源固定为 `esp-video-components`。
+   - 完成硬件物理层、时钟、电平、HAL 依赖与 NuttX video 接口审计。
+   - 真机串口测试通过（`sc2336_probe test 720p`、`sc2336_probe cycle 10 720p` 等全通过），日志已归档至 `hardware-logs/`。
+2. **AUD-001（ES8311 音频编解码器 + I2S0 驱动 + 板载功放 + CLI 测试工具，已合入）**：
+   - 实现了 ESP32-P4 I2S0 下半部驱动与 ES8311 编解码器适配，注册 `/dev/audio/pcm0` 与 `/dev/audio/pcm_in0`。
+   - 团队仓实现 `es8311_audio` 测试套件（`probe`, `dump`, `tone`, `record`）。
+   - 代码已进入 PR #340 与团队仓主基线。
+3. **DISP-001（MIPI DSI 驱动 + Framebuffer `/dev/fb0` + LVGL 9.1.0 + `dsi_display` CLI，已合入）**：
+   - 实现了 ESP32-P4 MIPI DSI Host 控制器、D-PHY TX PLL (1000 Mbps/lane)、DCS 指令引擎与 Video Mode DPI 时序配置。
+   - 完整实现 NuttX 标准 `struct fb_vtable_s` 并在 PSRAM 中分配帧缓冲区。
+   - 团队仓完成 GPIO26 背光/GPIO27 复位控制，注册 `/dev/fb0`，集成 LVGL 9.1.0 演示 (`lvgldemo`) 与 `dsi_display` CLI（`info`, `bars`, `color`, `grid`, `fps`）。
+   - 代码已进入 PR #340 与团队仓。
 
 ### 14.2 下一步任务清单（Next Actions）
 
-1. **AUD-001 实板验证（待板卡连接后执行）**：
+1. **AUD-001 实板串口验证（待板卡连接后执行）**：
    - 烧录最新固件：`./build.sh vendor/openvela/boards/contest2026_345_board/configs/nsh -j16`
    - NSH 验证步骤：
      ```bash
@@ -863,7 +872,28 @@ SHA-256。不要只在聊天中报告 PASS。
      nsh> es8311_audio record 3 /data/rec.raw
      ```
    - 归档实板日志至 `hardware-logs/esp32p4-audio-es8311-smoke-YYYY-MM-DD.log` 并计算 SHA-256。
-2. **CAM-005（公共 NuttX 仓 & 团队仓）：CSI DW-GDMA DMA 超时分析与 PSRAM 取帧调通**：
+
+2. **DISP-001 实板显示与 LVGL 验证（待板卡连接后执行）**：
+   - NSH 验证步骤：
+     ```bash
+     # 1. 查看 Framebuffer 信息
+     nsh> dsi_display info
+
+     # 2. 绘制标准 8 色彩条图案（校验色彩通道与 RGB565 映射）
+     nsh> dsi_display bars
+
+     # 3. 绘制 32x32 网格与中央瞄准线（校验分辨率与对齐）
+     nsh> dsi_display grid
+
+     # 4. 动态刷屏帧率压测（统计 FPS 与带宽）
+     nsh> dsi_display fps 5
+
+     # 5. 启动 LVGL 控件演示
+     nsh> lvgldemo
+     ```
+   - 归档实板日志至 `hardware-logs/esp32p4-dsi-display-smoke-YYYY-MM-DD.log` 并计算 SHA-256。
+
+3. **CAM-005（公共 NuttX 仓 & 团队仓）：CSI DW-GDMA DMA 超时分析与 PSRAM 取帧调通**：
    - 当前 WIP 已保存在 `feat/esp32p4-csi-wip` (nuttx) 和 `feat/esp32p4-csi-dma` (team)。
    - 核心任务：结合 `sc2336_probe capture` 超时快照，分析 D-PHY HS 接收到 Bridge FIFO 写入及 DW-GDMA 握手时序。
 
