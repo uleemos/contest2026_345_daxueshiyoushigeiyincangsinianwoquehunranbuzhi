@@ -1,0 +1,12 @@
+#
+# For a description of the syntax of this configuration file, see the
+# kconfig-language.txt file in the NuttX tools repository.
+#
+
+config LVX_USE_DEMO_CONTEST2026_345_DSI_DISPLAY
+	bool "Contest 2026 team 345 MIPI DSI Display test utility"
+	default n
+	depends on VIDEO_FB && ESP32P4_MIPI_DSI
+	---help---
+		Enable the ESP32-P4 MIPI DSI display color bar, grid, frame rate,
+		and framebuffer test utility.

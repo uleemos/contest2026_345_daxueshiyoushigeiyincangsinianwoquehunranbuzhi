@@ -1,0 +1,11 @@
+if(CONFIG_LVX_USE_DEMO_CONTEST2026_345_DSI_DISPLAY)
+  nuttx_add_application(
+    NAME
+    dsi_display
+    SRCS
+    dsi_display_main.c
+    STACKSIZE
+    4096
+    PRIORITY
+    SCHED_PRIORITY_DEFAULT)
+endif()

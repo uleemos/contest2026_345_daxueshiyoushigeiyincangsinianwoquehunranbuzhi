@@ -917,3 +917,52 @@ SHA-256 `9ef17f2c8a1e7ff3f97763288001966001123fc986a2e0e771005ef2bc7f85e4`。
 - **代码规范**：所有新增/修改文件（`esp32p4_i2s.h`, `esp32p4_i2s.c`, `board_audio.h`, `board_audio.c`, `board_boot.c`, `es8311_audio_main.c`）经 `nxstyle` 工具全量检查，**0 errors, 0 warnings (100% PASS)**。
 - **符号核验**：`riscv-none-elf-nm` 证实 `board_audio_initialize`, `es8311_audio_main`, `es8311_initialize`, `esp32p4_i2sbus_initialize` 全部成功编入固件 ELF。
 - **构建输出**：`nuttx.bin` 成功生成，Exit Code 0。
+
+---
+
+## 17. MIPI DSI 显示屏驱动 + Framebuffer + LVGL 图形子系统 (2026-08-23)
+
+### 17.1 硬件引脚与架构映射
+
+针对 **ESP32-P4X Function EV Board V1.8** 实板电路与 MIPI DSI 显示屏接口：
+- **MIPI DSI 接口**：
+  - 2 组高速差分数据通道（`DSI_D0P/N`, `DSI_D1P/N`）与 1 组差分时钟通道（`DSI_CLKP/N`）。
+  - 单通道 Lane 速率达 1000 Mbps，总带宽 2000 Mbps。
+- **背光控制 (`LCD_BL`)**：
+  - **GPIO26**：推挽输出，输出高电平使能显示屏背光驱动。
+- **硬件复位 (`LCD_RST`)**：
+  - **GPIO27**：推挽输出，上电拉低复位脉冲（10ms），拉高释放复位（120ms）等待屏幕内部初始化完毕。
+- **共享控制总线 (I2C0)**：
+  - `SDA = GPIO7`, `SCL = GPIO8`（共享用于 GT911 电容触摸 IC `0x5D`/`0x14`）。
+
+### 17.2 驱动分层与架构实现
+
+1. **ESP32-P4 MIPI DSI Lower-Half 驱动 (`arch/risc-v/src/esp32p4/esp32p4_mipi_dsi.c`)**：
+   - **时钟树配置**：开启 DSI 系统时钟 `HP_SYS_CLKRST.soc_clk_ctrl1.reg_dsi_sys_clk_en = 1`，使能 D-PHY 配置时钟与 PLL 参考时钟 `HP_SYS_CLKRST.peri_clk_ctrl03.reg_mipi_dsi_dphy_cfg_clk_en = 1`, `reg_mipi_dsi_dphy_pll_refclk_en = 1`；
+   - **DPI 像素时钟**：选通 PLL_F240M 时钟源，按目标像素时钟动态分频配置 `HP_SYS_CLKRST.peri_clk_ctrl03.reg_mipi_dsi_dpiclk_div_num` 并使能 `reg_mipi_dsi_dpiclk_en`；
+   - **D-PHY TX PLL 初始化**：基于 40 MHz 晶振基准配置 D-PHY TX PLL，设置 1000 Mbps Lane 速率并校准 HS/LP 转换时序；
+   - **DCS 指令引擎**：封装 `esp32p4_mipi_dsi_write_dcs` 与 `esp32p4_mipi_dsi_read_dcs`，支持向面板发送 Short/Long DCS 封包（Soft Reset `0x01`、Sleep Out `0x11`、Display On `0x29`、Set Pixel Format `0x3A` 等）；
+   - **Video Mode DPI 时序引擎**：配置 DSI Host DPI 水平（HBP, HFP, HSYNC, HACT）与垂直（VBP, VFP, VSYNC, VACT）时序，支持 Non-Burst Pulse / Non-Burst Event / Burst 模式；
+   - **Bridge 格式转换与流控**：针对 ESP32-P4 v3.x 配置 Bridge 输入/输出色彩空间映射（RGB565/RGB888）与内部 FIFO 阈值。
+2. **NuttX Framebuffer 驱动接口 (`arch/risc-v/src/esp32p4/esp32p4_mipi_dsi.c`)**：
+   - 完整实现 NuttX 标准 `fb_vtable_s` 操作集：`getvideoinfo`, `getplaneinfo`, `pan_display`, `setpower`；
+   - 在 PSRAM 中分配 64-byte 字节对齐的图形帧缓冲区，在 `pan_display` 中结合 `esp_cache_msync(..., ESP_CACHE_MSYNC_FLAG_DIR_C2M)` 保证 CPU 绘制数据即时刷入物理内存；
+   - 导出标准架构函数 `up_fbinitialize(int display)`、`up_fbgetvplane(int display, int plane)`、`up_fbuninitialize(int display)`。
+3. **板级显示子系统集成 (`board/contest_board/src/board_display.c`)**：
+   - 在 `board_app_initialize()` 中自动执行：GPIO26/27 初始化、复位脉序、D-PHY PLL 配置、面板 DCS 唤醒时序、`/dev/fb0` 设备节点注册、启动连续 Video 模式视频流推送。
+4. **DSI Display CLI 测试套件 (`app/dsi_display/dsi_display_main.c`)**：
+   - `info`: 查看 Framebuffer 驱动信息、分辨率、位深、行步长与显存地址；
+   - `bars`: 在屏幕上绘制 SMPTE 标准 8 色条测试图形；
+   - `color <r> <g> <b>`: 全屏纯色填充测试（校验色彩映射与坏点）；
+   - `grid`: 绘制 32x32 像素定位网格与中央瞄准框（校验分辨率与边界对齐）；
+   - `fps [duration_sec]`: 动态跳跃色块帧率压测，统计真实刷屏 FPS 与显存吞吐率（MB/s）。
+5. **LVGL 9.1.0 图形子系统支持 (`apps/graphics/lvgl`)**：
+   - 启用 `CONFIG_GRAPHICS_LVGL=y`、`CONFIG_LV_USE_NUTTX=y`、`CONFIG_LV_USE_DEMO_WIDGETS=y`、`CONFIG_EXAMPLES_LVGLDEMO=y`；
+   - 支持通过 NSH 直接运行 `lvgldemo` 启动图形控件演示。
+
+### 17.3 规范与构建验证
+
+- **代码规范**：所有新增/修改的 7 个文件（`esp32p4_mipi_dsi.h`, `esp32p4_mipi_dsi.c`, `board_display.h`, `board_display.c`, `board_boot.c`, `dsi_display_main.c`）经 `nxstyle` 全量检查，**0 errors, 0 warnings (100% PASS)**。
+- **符号核验**：`riscv-none-elf-nm` 证实 `board_display_initialize`, `esp32p4_mipi_dsi_initialize`, `esp32p4_mipi_dsi_start_video`, `dsi_display_main`, `lvgldemo_main` 全部正确链接至固件。
+- **固件产物**：`nuttx.bin` 大小 643 KB (657,556 字节)，SHA-256 `771712d51c5a00ffcd8b38001582ec17703ef6b0699b2828aa0edce2d6844184`。
+

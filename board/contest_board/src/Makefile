@@ -24,4 +24,8 @@ ifeq ($(CONFIG_AUDIO_ES8311),y)
 CSRCS += board_audio.c
 endif
 
+ifeq ($(CONFIG_ESP32P4_MIPI_DSI),y)
+CSRCS += board_display.c
+endif
+
 include $(TOPDIR)/boards/Board.mk

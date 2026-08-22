@@ -18,6 +18,7 @@
 #include "board_i2c.h"
 #include "board_spiflash.h"
 #include "board_audio.h"
+#include "board_display.h"
 
 /****************************************************************************
  * Public Functions
@@ -69,6 +70,14 @@ int board_app_initialize(uintptr_t arg)
 
 #if defined(CONFIG_AUDIO_ES8311) && defined(CONFIG_ESP32P4_I2S0)
   ret = board_audio_initialize();
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
+
+#ifdef CONFIG_ESP32P4_MIPI_DSI
+  ret = board_display_initialize();
   if (ret < 0)
     {
       return ret;
