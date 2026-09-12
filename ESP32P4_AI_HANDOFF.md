@@ -4,7 +4,7 @@
 >
 > 交接目标：让新的 AI 工具无需依赖此前聊天记录，即可从正确 Git 基线继续开发，并保持相同的仓库边界、硬件证据、构建验证和 PR 质量。
 >
-> 当前阶段：Gate G1 已通过；CAM-002～CAM-005 已完成并归档。CSI DW-GDMA 已能把 SC2336 720p/1080p packed RAW10 完整搬运到 PSRAM，并通过首帧、100 帧、5 分钟及重新上电首帧验证。标准 `/dev/video0` 接口和 30 分钟整机 soak 仍待完成，因此不宣称完整 Gate G2 长稳验收。AUD-001 已实现并提交 PR；VelaFit Stage 1～3 已通过固件编译与仿真测试。下一步推进 Camera 标准消费接口、30 分钟整机联测及 Stage 4 多媒体联动。
+> 当前阶段：Gate G1 已通过；CAM-002～CAM-005 已完成并归档。CSI DW-GDMA 已能把 SC2336 720p/1080p packed RAW10 完整搬运到 PSRAM，并通过首帧、100 帧、5 分钟及重新上电首帧验证。ESP32-C6 Wi-Fi 控制面已完成 SDIO/CMD53 DMA、ESP-Hosted RPC 和 STA 关联，最终冷启动 3/3、连接保持 60 秒通过，团队 PR #14 已于 2026-09-12 rebase and merge。标准 `/dev/video0`、Camera 30 分钟整机 soak，以及 Wi-Fi netdev/IPv4/DHCP 数据面仍待完成。
 >
 > 本文是当前状态和执行规则的入口；详细历史证据继续以 `PORTING_NOTES.md` 和 `hardware-logs/` 为准。
 
@@ -23,10 +23,13 @@
 7. Audio 子系统：板载 Everest Semi ES8311 Codec (I2C0 0x18)，I2S0 (MCLK=GPIO13, BCLK=GPIO12, WS=GPIO10, DOUT=GPIO9, DIN=GPIO11)，板载功放 PA_EN=GPIO53。
 8. 团队专属仓和公共 `nuttx` 是两个独立 Git 仓、两个独立 PR 流程。绝不能在
    一笔提交或一个 PR 中混合二者。
-9. 当前双仓 Audio PR 已推送：
-   - 公共 `nuttx`: `feat/esp32p4-i2s-audio` -> `open-vela/nuttx:feat/esp32p4-soc-contest2026`
-   - 团队仓: `feat/esp32p4-audio-es8311` -> `open-vela/contest2026_345_...:dev-ai-contest-2026`
-10. 实板不在手边时的接力规则：所有代码和构建均需在仿真与 nxstyle 层面 100% 严谨闭环；硬件验证清单和测试命令必须详细记录，待板卡连接后按既定步骤执行并归档硬件日志。
+9. 公共 NuttX 的连续 SoC 驱动统一维护在 PR #340；当前 head 是
+   `3369b18b815`，包含 CSI DW-GDMA、PR #342 SDMMC 基线及 C6 SDIO DMA
+   稳定性修复。
+10. 团队 PR #14 已合并，merge commit 为
+    `6bfdc41fa1423f59f6e016233d12c91673675bda`；下一团队功能分支必须从该
+    commit 对应的最新 `openvela/dev-ai-contest-2026` 创建。
+11. 实板不在手边时的接力规则：所有代码和构建均需在仿真与 nxstyle 层面 100% 严谨闭环；硬件验证清单和测试命令必须详细记录，待板卡连接后按既定步骤执行并归档硬件日志。
 
 ## 1. 仓库与远端管理背景
 
@@ -72,16 +75,16 @@ openvela  https://github.com/open-vela/contest2026_345_daxueshiyoushigeiyincangs
 
 赛事 base branch：`openvela/dev-ai-contest-2026`。
 
-截至本文创建时，PR #4 合并后的远端基线为：
+截至 2026-09-12，PR #14 rebase and merge 后的远端基线为：
 
 ```text
-2f32a81cc8845d8801936fcbddbe9202711502cd
+6bfdc41fa1423f59f6e016233d12c91673675bda
 ```
 
-当前接力文档工作分支从上述基线创建：
+后续团队功能分支必须从上述最新基线创建。本文档维护分支为：
 
 ```text
-docs/esp32p4-ai-handoff
+docs/post-pr14-handoff
 ```
 
 团队仓负责以下内容：
@@ -120,9 +123,9 @@ fork      git@github.com:uleemos/nuttx.git             # 个人 fork，实际 pu
 openvela  https://github.com/open-vela/nuttx            # 赛事公共上游
 ```
 
-本地联调分支：`feat/esp32p4-soc-contest2026`。
+本地联调分支及 PR head：`feat/esp32p4-soc-contest2026`。
 
-分支当前 HEAD：`d02a5314c1e847c20c0fa9760773d578b948f219`。
+分支当前 HEAD：`3369b18b815`。
 
 基点：`openvela/dev-ai-contest-2026` 的 `dd92bcf4257`。
 
@@ -132,10 +135,10 @@ PR base：`open-vela/nuttx:dev-ai-contest-2026`。
 
 PR head：`uleemos:feat/esp32p4-soc-contest2026`。
 
-截至 2026-08-30，PR #340 为 Open、非 Draft、GitHub 判定 MERGEABLE；CLA、
-checkpatch 和已有 CI 全部通过，正随开发阶段追加公共 SoC 驱动。
+截至 2026-09-12，PR #340 仍为 Open、非 Draft；CLA 和 checkpatch 已通过，
+公共 SoC 驱动继续在同一 PR 上追加。
 
-该分支已有 12 个提交，公共 SoC 驱动持续以独立 commit 追加：
+公共 SoC 驱动持续以独立 commit 追加；最近与 Camera/C6 Wi-Fi 相关的提交为：
 
 ```text
 896b5f10ea4  risc-v: add minimal ESP32-P4 bring-up support
@@ -150,6 +153,10 @@ d6d995a6748  risc-v/esp32p4: add MIPI CSI controller and D-PHY driver
 6ac30d6cf0f  risc-v/esp32p4: add MIPI DSI and framebuffer support
 d02a5314c1e  arch/risc-v/esp32p4: add 2D-DMA controller and PPA hardware acceleration driver
 c52f4ae52e2  arch/risc-v/esp32p4: add SDMMC Host Controller driver and 4-bit bus support
+d3b28596e8d  risc-v/esp32p4: add CSI DW-GDMA PSRAM frame capture
+e6c1e1cc805  risc-v/esp32p4: add ESP32-P4 SDMMC host controller
+9990e52b5cd  risc-v/esp32p4: stabilize SDIO DMA transfers
+3369b18b815  risc-v/esp32p4: fix SDMMC checkpatch findings
 ```
 
 不要等待 PR #340 合入才继续开发。新的公共 SoC 层能力可以在该分支继续形成独立
@@ -190,6 +197,8 @@ cda4af9f0026a25275953392ea63245ce339b82b
 | [#2](https://github.com/open-vela/contest2026_345_daxueshiyoushigeiyincangsinianwoquehunranbuzhi/pull/2) | `66ff99f3f20c122c93083184015405bc72438a3c` | GPIO bring-up 和真机验证 |
 | [#3](https://github.com/open-vela/contest2026_345_daxueshiyoushigeiyincangsinianwoquehunranbuzhi/pull/3) | `9ccfb2e14ac6c85317342e756ab79766f6c1ab51` | I2C、32 MB PSRAM、16 MB Flash/MTD |
 | [#4](https://github.com/open-vela/contest2026_345_daxueshiyoushigeiyincangsinianwoquehunranbuzhi/pull/4) | `2f32a81cc8845d8801936fcbddbe9202711502cd` | G1 稳定性和 SC2336 只读识别 |
+| [#13](https://github.com/open-vela/contest2026_345_daxueshiyoushigeiyincangsinianwoquehunranbuzhi/pull/13) | `559c2b90ecaabd58d59427826112f1ff2bb38bad` | CSI DW-GDMA PSRAM 取帧真机验收与归档 |
+| [#14](https://github.com/open-vela/contest2026_345_daxueshiyoushigeiyincangsinianwoquehunranbuzhi/pull/14) | `6bfdc41fa1423f59f6e016233d12c91673675bda` | ESP32-C6 Hosted Wi-Fi STA 控制面、真机验收与文档 |
 
 这些 PR 采用 Rebase and merge，因此功能分支上的原 commit SHA 与赛事 base 中的
 合并 SHA 可能不同。下一阶段必须从最新 `openvela/dev-ai-contest-2026` 创建新分支，
@@ -323,7 +332,9 @@ Remaining assumptions and hardware tests:
 | Camera CSI DW-GDMA 与 PSRAM 取帧驱动 (CAM-005) | 已真机通过 | NuttX `d3b28596e8d`；720p/1080p30/1080p25 首帧、720p 100 帧、5 分钟及重新上电首帧均 PASS；`hardware-logs/csi-dw-gdma-validation.md` |
 | MIPI DSI/LCD/Touch | 未实现 | Camera 第一帧后独立推进 |
 | 通用 GP-SPI | 尚未作为独立子系统完成 | 不属于当前 Camera 关键路径，可另开增量 |
-| Ethernet/C6 Wi-Fi/Audio | 未实现 | G4 后再按优先级推进，不能阻塞离线闭环 |
+| ESP32-C6 Hosted Wi-Fi 控制面 | 已真机通过 | SDIO/CMD53 DMA、RPC、STA 关联；冷启动 3/3、保持 60 秒；团队 PR #14 |
+| Wi-Fi netdev/IPv4/DHCP 数据面 | 未实现 | 下一阶段接入 WLAN 数据帧、netdev、DHCP、ping 和长稳 |
+| Audio | 已实现并提交 | ESP32-P4 I2S0、ES8311、板级 PA 与 CLI 验证入口 |
 
 ### 5.1 Gate G1 最终结果
 
@@ -812,6 +823,7 @@ Camera -> 人体关键点推理 -> 深蹲 FSM -> 自动计数 -> 错误检测 ->
 | `hardware-logs/esp32p4-sc2336-id-probe-2026-08-15.log` | SC2336 ID 0xcb3a |
 | `hardware-logs/esp32p4-g1-post-cold-smoke-2026-08-15.log` | cold boot 后联合 smoke |
 | `hardware-logs/esp32p4-sc2336-control-smoke-2026-08-19.log` | SC2336 软复位、初始化表与流控制真机全流程与 10x 循环测试 |
+| `hardware-logs/esp32c6-wifi-acceptance-20260912.log` | C6 SDIO/CMD53 DMA、ESP-Hosted RPC、STA 关联 3/3 与 60 秒保持；SHA-256 `710e91a69c295407857333bfea37a1628da85248f6b1863d794d96a098a7fbba` |
 
 新增阶段必须把日志复制到 `hardware-logs/`，命名包含板卡、功能、日期；在文档记录
 SHA-256。不要只在聊天中报告 PASS。
@@ -873,6 +885,10 @@ SHA-256。不要只在聊天中报告 PASS。
      - `velafit_storage`：本地落盘持久化（`/data/velafit/sessions/`）与二进制索引表（`index.bin`）；
      - `velafit_sync`：预留给 C6 伙伴的标准化回调 Hook（`velafit_sync_register_sender`），支持断网安全降级与 Mock 闭环测试。
    - **工程与规范闭环**：`app/velafit_ai/` 全部 36 个源文件 100% 通过 `nxstyle`（0 Error, 0 Warning），全量固件编译 **0 Error, 0 Warning**，生成 `nuttx.bin` (485,592 bytes, checksum 0x41 valid)。
+6. **ESP32-C6 Wi-Fi 控制面（已完成代码、构建、下载、真机验证和 PR #14 合并）**：
+   - 基于 NuttX PR #342 的 SDMMC/CMD53 DMA 思路完成 P4↔C6 SDIO 4-bit 链路，并补齐实板时序、错误传播、累计 RX 计数和多 RPC 帧解析。
+   - ESP-Hosted-MCU 1.4.7 握手、STA 配置与关联成功；最终自动冷启动 3/3，连续保持 60 秒无断开。
+   - 当前边界仅为 Wi-Fi 控制面，尚未注册 NuttX netdev，也未完成 IPv4/DHCP/ping；详见 `docs/ESP32C6_WIFI_BRINGUP.md`。
 
 ### 14.2 下一步任务清单（Next Actions）
 
@@ -913,6 +929,9 @@ SHA-256。不要只在聊天中报告 PASS。
 3. **Camera G2 收尾**：
    - CAM-005 已完成；下一步接入 `/dev/video0`，执行 30 分钟整机 soak，并记录
      FPS、错误计数、heap/PSRAM 和 buffer queue 水位。
+4. **ESP32-C6 Wi-Fi 数据面**：
+   - 接入 ESP-Hosted WLAN 数据帧收发并注册 NuttX netdev。
+   - 完成 DHCP、网关 ping、断线重连、吞吐和长稳测试，归档脱敏串口证据。
 
 ## 15. 可直接交给另一 AI 的启动提示词
 
@@ -937,7 +956,8 @@ VelaFit AI 智能运动体态教练项目。工作区为 /home/uleemos/openvela-
    41 个源码文件 100% 通过 nxstyle 检查，全量固件编译通过（0 Error, 0 Warning）。
 2. AUD-001（ES8311 音频子系统）已完成并已推送 PR。
 3. CAM-005（CSI DW-GDMA PSRAM 取帧）已完成并通过首帧、100 帧、5 分钟及重新上电首帧验证；NuttX commit `d3b28596e8d`。
-4. 下一步：完成 `/dev/video0`、Camera 30 分钟整机 soak，并运行 velafit_ai all / es8311_audio 进行多媒体真机验证与证据归档。
+4. ESP32-C6 Wi-Fi 控制面已通过 SDIO/CMD53 DMA、ESP-Hosted 1.4.7、STA 关联冷启动 3/3 和 60 秒保持验收；团队 PR #14 已合并，NuttX PR #340 head 为 `3369b18b815`。
+5. 下一步可从最新团队基线 `6bfdc41fa1423f59f6e016233d12c91673675bda` 开新分支；候选任务为 Wi-Fi netdev/IPv4/DHCP 数据面，或 Camera `/dev/video0` 与 30 分钟整机 soak。不要继续使用已合并的旧功能分支。
 ```
 
 ## 16. 接力文档维护规则
