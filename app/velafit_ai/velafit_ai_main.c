@@ -99,7 +99,13 @@ static void print_usage(void)
 
 static int cmd_test_pose(void)
 {
-  printf("\n>>> [Stage 2] Running Static Pose Inference...\n");
+  const char *backend = velafit_pose_model_backend_name();
+  bool is_real = velafit_pose_model_backend_is_real();
+
+  printf("\n>>> [Stage 2] Running Static Pose %s...\n",
+         is_real ? "Inference" : "Simulation");
+  printf("  Backend          : %s (%s)\n", backend,
+         is_real ? "REAL INFERENCE" : "NOT REAL INFERENCE");
 
   velafit_perf_t perf;
   pose_frame_t detected_pose;
@@ -147,7 +153,7 @@ static int cmd_test_pose(void)
   printf("  Knee/Ankle Ratio : %0.2f (Threshold > 0.72)\n",
          knee_ankle_ratio);
 
-  printf("\n--- Edge AI Profiling Metrics ---\n");
+  printf("\n--- Backend Profiling Metrics ---\n");
   printf("  Preprocess       : %lu us\n",
          (unsigned long)perf.preprocess_us);
   printf("  Forward Infer    : %lu us\n",
@@ -156,7 +162,9 @@ static int cmd_test_pose(void)
          (unsigned long)perf.postprocess_us);
   printf("  Total Latency    : %lu us (approx %.1f FPS)\n",
          (unsigned long)perf.total_us, perf.fps);
-  printf(">>> [Stage 2] Pose Inference Test: [PASS]\n\n");
+  printf(">>> [Stage 2] Pose %s Test: [%s PASS]\n\n",
+         is_real ? "Inference" : "Simulation",
+         is_real ? "INFERENCE" : "SIMULATION");
   return 0;
 }
 
@@ -260,15 +268,17 @@ static int cmd_test_jumping_jack(int cycles)
   jumping_jack_fsm_reset(&fsm);
 
   uint32_t t = 0;
-  for (int i = 0; i < 3 * cycles; i++)
+  for (int i = 0; i < cycles; i++)
     {
       jumping_jack_fsm_update(&fsm, &g_sample_pose_jj_closed, t);
       t += 100;
       jumping_jack_fsm_update(&fsm, &g_sample_pose_jj_open, t);
       t += 300;
-      bool rep =
-        jumping_jack_fsm_update(&fsm, &g_sample_pose_jj_closed, t);
-      t += 300;
+      jumping_jack_fsm_update(&fsm, &g_sample_pose_jj_closed, t);
+      t += 100;
+      bool rep = jumping_jack_fsm_update(&fsm,
+                                         &g_sample_pose_jj_closed, t);
+      t += 200;
 
       printf("  JJ Rep %d Decision: %s (Total: %lu, Valid: %lu)\n",
              i + 1, rep ? "YES [PASS]" : "NO",
@@ -280,8 +290,11 @@ static int cmd_test_jumping_jack(int cycles)
   printf("  Total Reps : %lu\n", (unsigned long)fsm.total_reps);
   printf("  Valid Reps : %lu\n", (unsigned long)fsm.valid_reps);
   printf("======================================================\n");
-  printf(">>> [Stage 3] Jumping Jack Test: [PASS]\n\n");
-  return 0;
+  bool pass = fsm.total_reps == (uint32_t)cycles &&
+              fsm.valid_reps == (uint32_t)cycles;
+  printf(">>> [Stage 3] Jumping Jack Test: [%s]\n\n",
+         pass ? "PASS" : "FAIL");
+  return pass ? 0 : -EIO;
 }
 
 /****************************************************************************
@@ -339,10 +352,12 @@ static int cmd_test_pushup(int cycles)
       printf("\n[Test 3/3] Simulating Sagging Hips Push-up...\n");
       pushup_fsm_update(&fsm, &g_sample_pose_pushup_plank, t);
       t += 200;
-      pushup_fsm_update(&fsm, &g_sample_pose_pushup_sag, t);
+      pushup_fsm_update(&fsm, &g_sample_pose_pushup_bottom_deep, t);
       t += 400;
       bool rep3 =
-        pushup_fsm_update(&fsm, &g_sample_pose_pushup_plank, t);
+        pushup_fsm_update(&fsm, &g_sample_pose_pushup_sag, t);
+      t += 200;
+      pushup_fsm_update(&fsm, &g_sample_pose_pushup_plank, t);
       t += 300;
 
       printf("  => Rep Decision: %s (Sagging: %lu, Quality: %s)\n",
@@ -359,8 +374,13 @@ static int cmd_test_pushup(int cycles)
   printf("  Sagging Faults : %lu\n", (unsigned long)fsm.hips_sag_count);
   printf("  Piking Faults  : %lu\n", (unsigned long)fsm.hips_pike_count);
   printf("=================================================\n");
-  printf(">>> [Stage 3] Push-up FSM Test: [PASS]\n\n");
-  return 0;
+  bool pass = fsm.total_reps == (uint32_t)(cycles * 3) &&
+              fsm.valid_reps == (uint32_t)cycles &&
+              fsm.shallow_count == (uint32_t)cycles &&
+              fsm.hips_sag_count == (uint32_t)cycles;
+  printf(">>> [Stage 3] Push-up FSM Test: [%s]\n\n",
+         pass ? "PASS" : "FAIL");
+  return pass ? 0 : -EIO;
 }
 
 /****************************************************************************
@@ -382,25 +402,29 @@ static int cmd_test_plank(int seconds)
 
   uint32_t t = 0;
 
+  /* Prime the timer at t=0; duration is accumulated between samples. */
+
+  plank_fsm_update(&fsm, &g_sample_pose_plank_perfect, t);
+
   printf("  [Phase 1] 4s Perfect Plank...\n");
   for (int i = 0; i < 4; i++)
     {
-      plank_fsm_update(&fsm, &g_sample_pose_plank_perfect, t);
       t += 1000;
+      plank_fsm_update(&fsm, &g_sample_pose_plank_perfect, t);
     }
 
   printf("  [Phase 2] 3s Sagging Hips Plank...\n");
   for (int i = 0; i < 3; i++)
     {
-      plank_fsm_update(&fsm, &g_sample_pose_plank_sag, t);
       t += 1000;
+      plank_fsm_update(&fsm, &g_sample_pose_plank_sag, t);
     }
 
   printf("  [Phase 3] 3s Piking Hips Plank...\n");
   for (int i = 0; i < 3; i++)
     {
-      plank_fsm_update(&fsm, &g_sample_pose_plank_pike, t);
       t += 1000;
+      plank_fsm_update(&fsm, &g_sample_pose_plank_pike, t);
     }
 
   float score = plank_fsm_get_quality_score(&fsm);
@@ -418,8 +442,13 @@ static int cmd_test_plank(int seconds)
          (unsigned long)fsm.hips_pike_duration_ms);
   printf("  Quality Score  : %.1f %%\n", score);
   printf("===============================================\n");
-  printf(">>> [Stage 3] Plank Timer Test: [PASS]\n\n");
-  return 0;
+  bool pass = fsm.total_hold_duration_ms == 10000 &&
+              fsm.valid_hold_duration_ms == 4000 &&
+              fsm.hips_sag_duration_ms == 3000 &&
+              fsm.hips_pike_duration_ms == 3000;
+  printf(">>> [Stage 3] Plank Timer Test: [%s]\n\n",
+         pass ? "PASS" : "FAIL");
+  return pass ? 0 : -EIO;
 }
 
 /****************************************************************************
@@ -428,6 +457,8 @@ static int cmd_test_plank(int seconds)
 
 static int cmd_render(const char *ppm_path)
 {
+  int output_ret = OK;
+
   printf("\n>>> [Stage 4] Running OSD Skeleton Renderer...\n");
 
   uint32_t w = 320;
@@ -461,25 +492,34 @@ static int cmd_render(const char *ppm_path)
 
   if (ppm_path != NULL && ppm_path[0] != '\0')
     {
-      int ret = velafit_render_save_ppm(&canvas, ppm_path);
-      if (ret == OK)
+      output_ret = velafit_render_save_ppm(&canvas, ppm_path);
+      if (output_ret == OK)
         {
           printf("  [2/2] Saved PPM Image: %s [OK]\n", ppm_path);
         }
       else
         {
-          printf("  [2/2] Failed to save PPM: %d\n", ret);
+          printf("  [2/2] Failed to save PPM: %d\n", output_ret);
         }
     }
   else
     {
-      velafit_render_to_fb0(&canvas);
-      printf("  [2/2] Rendered to /dev/fb0 [OK]\n");
+      output_ret = velafit_render_to_fb0(&canvas);
+      if (output_ret == OK)
+        {
+          printf("  [2/2] Rendered to /dev/fb0 [OK]\n");
+        }
+      else
+        {
+          printf("  [2/2] /dev/fb0 unavailable: %d [NOT VERIFIED]\n",
+                 output_ret);
+        }
     }
 
   free(buf);
-  printf(">>> [Stage 4] OSD Skeleton Render Test: [PASS]\n\n");
-  return 0;
+  printf(">>> [Stage 4] OSD Skeleton Render Test: [%s]\n\n",
+         output_ret == OK ? "PASS" : "NOT VERIFIED");
+  return output_ret;
 }
 
 /****************************************************************************
@@ -1012,6 +1052,8 @@ static int cmd_sdcard(const char *sub)
 
 int main(int argc, char *argv[])
 {
+  int ret = 0;
+
   if (argc < 2)
     {
       print_usage();
@@ -1026,91 +1068,91 @@ int main(int argc, char *argv[])
     }
   else if (strcmp(cmd, "ppa") == 0)
     {
-      velafit_ppa_run_benchmarks();
+      ret = velafit_ppa_run_benchmarks();
     }
   else if (strcmp(cmd, "test_pose") == 0)
     {
-      cmd_test_pose();
+      ret = cmd_test_pose();
     }
   else if (strcmp(cmd, "test_squat") == 0)
     {
       int count = (argc >= 3) ? atoi(argv[2]) : 1;
-      cmd_test_squat(count);
+      ret = cmd_test_squat(count);
     }
   else if (strcmp(cmd, "test_jj") == 0 ||
            strcmp(cmd, "test_jumping_jack") == 0)
     {
       int count = (argc >= 3) ? atoi(argv[2]) : 1;
-      cmd_test_jumping_jack(count);
+      ret = cmd_test_jumping_jack(count);
     }
   else if (strcmp(cmd, "test_pushup") == 0)
     {
       int count = (argc >= 3) ? atoi(argv[2]) : 1;
-      cmd_test_pushup(count);
+      ret = cmd_test_pushup(count);
     }
   else if (strcmp(cmd, "test_plank") == 0)
     {
       int seconds = (argc >= 3) ? atoi(argv[2]) : 10;
-      cmd_test_plank(seconds);
+      ret = cmd_test_plank(seconds);
     }
   else if (strcmp(cmd, "render") == 0)
     {
       const char *ppm = (argc >= 3) ? argv[2] : NULL;
-      cmd_render(ppm);
+      ret = cmd_render(ppm);
     }
   else if (strcmp(cmd, "audio") == 0)
     {
       const char *cue = (argc >= 3) ? argv[2] : "all";
-      cmd_audio(cue);
+      ret = cmd_audio(cue);
     }
   else if (strcmp(cmd, "pipeline") == 0)
     {
       int cycles = (argc >= 3) ? atoi(argv[2]) : 1;
       const char *ppm = (argc >= 4) ? argv[3] : NULL;
-      velafit_pipeline_run_simulation("squat", cycles, ppm);
+      ret = velafit_pipeline_run_simulation("squat", cycles, ppm);
     }
   else if (strcmp(cmd, "plan") == 0)
     {
       const char *sub = (argc >= 3) ? argv[2] : "list";
       const char *arg = (argc >= 4) ? argv[3] : NULL;
-      cmd_plan(sub, arg);
+      ret = cmd_plan(sub, arg);
     }
   else if (strcmp(cmd, "storage") == 0)
     {
       const char *sub = (argc >= 3) ? argv[2] : "list";
       const char *arg = (argc >= 4) ? argv[3] : NULL;
-      cmd_storage(sub, arg);
+      ret = cmd_storage(sub, arg);
     }
   else if (strcmp(cmd, "sync") == 0)
     {
       const char *sub = (argc >= 3) ? argv[2] : "status";
-      cmd_sync(sub);
+      ret = cmd_sync(sub);
     }
   else if (strcmp(cmd, "config") == 0)
     {
       const char *sub  = (argc >= 3) ? argv[2] : "show";
       const char *arg1 = (argc >= 4) ? argv[3] : NULL;
       const char *arg2 = (argc >= 5) ? argv[4] : NULL;
-      cmd_config(sub, arg1, arg2);
+      ret = cmd_config(sub, arg1, arg2);
     }
   else if (strcmp(cmd, "touch") == 0)
     {
       int sec = (argc >= 3) ? atoi(argv[2]) : 15;
-      velafit_touch_run_test(sec);
+      ret = velafit_touch_run_test(sec);
     }
   else if (strcmp(cmd, "sdcard") == 0)
     {
       const char *sub = (argc >= 3) ? argv[2] : "benchmark";
-      cmd_sdcard(sub);
+      ret = cmd_sdcard(sub);
     }
   else if (strcmp(cmd, "kws") == 0)
     {
       const char *mode = (argc >= 3) ? argv[2] : "test";
-      cmd_kws(mode);
+      ret = cmd_kws(mode);
     }
   else if (strcmp(cmd, "cloud") == 0)
     {
-      cmd_cloud();
+      ret = cmd_cloud();
     }
   else if (strcmp(cmd, "report") == 0)
     {
@@ -1118,31 +1160,36 @@ int main(int argc, char *argv[])
     }
   else if (strcmp(cmd, "all") == 0)
     {
+      int failures = 0;
+
       printf("\n=======================================================\n");
       printf("  VelaFit AI Full Suite (Stage 1 ~ 6 + Config + MIMO)\n");
       printf("=======================================================\n");
       esp_nn_run_benchmarks();
-      velafit_ppa_run_benchmarks();
-      cmd_test_pose();
-      cmd_test_squat(1);
-      cmd_test_jumping_jack(1);
-      cmd_test_pushup(1);
-      cmd_test_plank(10);
-      cmd_render(NULL);
-      cmd_audio("all");
-      velafit_pipeline_run_simulation("squat", 1, NULL);
-      velafit_pipeline_run_simulation("pushup", 1, NULL);
-      velafit_pipeline_run_simulation("plank", 1, NULL);
-      cmd_plan("run", "tabata");
-      cmd_storage("list", NULL);
-      cmd_sync("mock");
-      cmd_config("show", NULL, NULL);
-      cmd_kws("test");
-      cmd_cloud();
+      failures += velafit_ppa_run_benchmarks() < 0;
+      failures += cmd_test_pose() < 0;
+      failures += cmd_test_squat(1) < 0;
+      failures += cmd_test_jumping_jack(1) < 0;
+      failures += cmd_test_pushup(1) < 0;
+      failures += cmd_test_plank(10) < 0;
+      failures += cmd_render(NULL) < 0;
+      failures += cmd_audio("all") < 0;
+      failures += velafit_pipeline_run_simulation("squat", 1, NULL) < 0;
+      failures += velafit_pipeline_run_simulation("pushup", 1, NULL) < 0;
+      failures += velafit_pipeline_run_simulation("plank", 1, NULL) < 0;
+      failures += cmd_plan("run", "tabata") < 0;
+      failures += cmd_storage("list", NULL) < 0;
+      failures += cmd_sync("mock") < 0;
+      failures += cmd_config("show", NULL, NULL) < 0;
+      failures += cmd_kws("test") < 0;
+      failures += cmd_cloud() < 0;
       cmd_report();
       printf("=======================================================\n");
-      printf("  VelaFit AI Full Verification Suite: [ALL PASS]\n");
+      printf("  VelaFit AI Full Verification Suite: [%s]"
+             " (failures=%d)\n",
+             failures == 0 ? "PASS" : "INCOMPLETE", failures);
       printf("=======================================================\n\n");
+      ret = failures == 0 ? 0 : -EIO;
     }
   else
     {
@@ -1151,5 +1198,5 @@ int main(int argc, char *argv[])
       return -1;
     }
 
-  return 0;
+  return ret;
 }

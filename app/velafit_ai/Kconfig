@@ -4,9 +4,36 @@
 #
 
 config LVX_USE_DEMO_CONTEST2026_345_VELAFIT_AI
-	bool "Contest 2026 team 345 VelaFit Edge AI Inference Engine & Fitness Suite"
+	bool "Contest 2026 team 345 VelaFit fitness pipeline"
 	default y
 	---help---
-		Enable the VelaFit Edge AI Inference Engine, INT8 Pose Estimation model,
-		One-Euro filter, Squat & Jumping Jack FSM counters, and Edge-Cloud
-		sync suite on ESP32-P4.
+		Enable the VelaFit pose-processing pipeline, One-Euro filter, exercise
+		state machines, renderer, and edge-cloud synchronization components on
+		ESP32-P4. Image inference is available only when a real pose backend is
+		selected; the simulation backend is deterministic test data.
+
+if LVX_USE_DEMO_CONTEST2026_345_VELAFIT_AI
+
+choice
+	prompt "VelaFit pose inference backend"
+	default VELAFIT_POSE_BACKEND_NONE
+	---help---
+		Select how image frames are converted to 17 pose keypoints.  The
+		simulation backend is intended only for deterministic algorithm and UI
+		tests; it is not image inference and must not be used as AI evidence.
+
+config VELAFIT_POSE_BACKEND_NONE
+	bool "No image inference backend"
+	---help---
+		Build the fitness algorithms without an image inference backend.  Image
+		inference commands fail with -ENOSYS instead of returning fake results.
+
+config VELAFIT_POSE_BACKEND_SIMULATION
+	bool "Deterministic sample-pose simulation"
+	---help---
+		Return a fixed sample pose for deterministic FSM, renderer, and pipeline
+		testing.  Runtime output is explicitly labelled SIMULATION.
+
+endchoice
+
+endif

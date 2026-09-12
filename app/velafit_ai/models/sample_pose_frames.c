@@ -192,7 +192,7 @@ const pose_frame_t g_sample_pose_pushup_bottom_deep =
   true
 };
 
-/* 7. Push-up Shallow (Incomplete depth, elbow ~118 deg) */
+/* 7. Push-up Shallow (Incomplete depth, elbow ~122 deg) */
 
 const pose_frame_t g_sample_pose_pushup_shallow =
 {
@@ -206,8 +206,8 @@ const pose_frame_t g_sample_pose_pushup_shallow =
     {0.30f, 0.50f, 0.96f},
     {0.27f, 0.58f, 0.92f},
     {0.27f, 0.58f, 0.92f},
-    {0.30f, 0.70f, 0.88f},
-    {0.30f, 0.70f, 0.88f},
+    {0.34f, 0.67f, 0.88f},
+    {0.34f, 0.67f, 0.88f},
     {0.55f, 0.52f, 0.98f},
     {0.55f, 0.52f, 0.98f},
     {0.72f, 0.54f, 0.95f},

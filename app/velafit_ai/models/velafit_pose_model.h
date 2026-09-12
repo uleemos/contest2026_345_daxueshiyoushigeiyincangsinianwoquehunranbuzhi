@@ -42,6 +42,10 @@ int velafit_pose_model_init(void);
 
 void velafit_pose_model_deinit(void);
 
+const char *velafit_pose_model_backend_name(void);
+
+bool velafit_pose_model_backend_is_real(void);
+
 int velafit_pose_infer(const uint8_t *rgb_image,
                        pose_frame_t *out_pose,
                        velafit_perf_t *perf);

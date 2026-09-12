@@ -37,6 +37,7 @@
 
 typedef struct
 {
+  float raw_prev;
   float x_prev;
   float dx_prev;
   float t_prev;

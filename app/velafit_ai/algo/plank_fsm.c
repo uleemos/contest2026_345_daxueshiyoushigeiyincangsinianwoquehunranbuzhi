@@ -49,7 +49,7 @@ void plank_fsm_init(plank_fsm_t *fsm)
 {
   fsm->state = PLANK_STATE_IDLE;
   fsm->start_time_ms = 0;
-  fsm->last_update_time_ms = 0;
+  fsm->last_update_time_ms = UINT32_MAX;
   fsm->total_hold_duration_ms = 0;
   fsm->valid_hold_duration_ms = 0;
   fsm->hips_sag_duration_ms = 0;
@@ -81,7 +81,7 @@ bool plank_fsm_update(plank_fsm_t *fsm,
       return false;
     }
 
-  if (fsm->last_update_time_ms == 0)
+  if (fsm->last_update_time_ms == UINT32_MAX)
     {
       fsm->start_time_ms = timestamp_ms;
       fsm->last_update_time_ms = timestamp_ms;
