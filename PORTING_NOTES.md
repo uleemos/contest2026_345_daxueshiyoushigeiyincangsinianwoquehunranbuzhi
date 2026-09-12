@@ -1373,6 +1373,24 @@ COM3 烧录校验均成功。烧录后的 esptool hard reset 出现 Windows COM3
 `uname -a` 同样无法写入，摄像头命令并未开始，因此该次不计入 Camera PASS/FAIL。
 下次物理重新上电后应补跑三模式首帧和 100 帧回归；详细说明见证据索引。
 
+## 28. ESP32-C6 Wi-Fi 控制面闭环与 PR #14 归档（2026-09-12）
+
+团队 PR [#14](https://github.com/open-vela/contest2026_345_daxueshiyoushigeiyincangsinianwoquehunranbuzhi/pull/14)
+已完成 rebase and merge，赛事分支合并提交为
+`6bfdc41fa1423f59f6e016233d12c91673675bda`。对应公共 NuttX 能力继续维护在
+PR #340，当前 head 为 `3369b18b815`。
+
+本阶段已完成 P4↔C6 SDIO 4-bit、CMD53 双向 DMA、ESP-Hosted-MCU 1.4.7 RPC
+握手和 Wi-Fi STA 关联。最终固件通过 3/3 自动冷启动关联，连续保持 60 秒无断开；
+GPIO54 已能由 P4 自动控制 C6_EN，不再要求每轮手工上下电。详细实现和验收边界见
+`docs/ESP32C6_WIFI_BRINGUP.md`，脱敏原始证据为
+`hardware-logs/esp32c6-wifi-acceptance-20260912.log`，SHA-256：
+`710e91a69c295407857333bfea37a1628da85248f6b1863d794d96a098a7fbba`。
+
+当前完成的是关联控制面，不包含 NuttX netdev、IPv4/DHCP 和 ping。下一阶段若继续
+Wi-Fi，应从最新 `openvela/dev-ai-contest-2026` 新建功能分支，实现 ESP-Hosted WLAN
+数据帧收发、netdev 注册、DHCP、网关 ping、断线重连、吞吐和长稳验收；不得在已经
+合并的 `feat/esp32p4-c6-wifi` 旧分支上继续叠加提交。
 
 
 
