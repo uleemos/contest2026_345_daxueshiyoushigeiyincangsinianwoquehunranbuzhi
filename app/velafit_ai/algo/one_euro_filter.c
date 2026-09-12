@@ -52,31 +52,10 @@ static float calc_alpha(float rate, float cutoff)
 }
 
 /****************************************************************************
- * Name: low_pass_filter_apply
- ****************************************************************************/
-
-static float low_pass_filter_apply(low_pass_filter_t *f,
-                                   float val,
-                                   float alpha)
-{
-  if (!f->initialized)
-    {
-      f->x_prev = val;
-      f->initialized = true;
-      return val;
-    }
-
-  float res = alpha * val + (1.0f - alpha) * f->x_prev;
-  f->x_prev = res;
-  return res;
-}
-
-/****************************************************************************
  * Name: one_euro_filter_step
  ****************************************************************************/
 
 static float one_euro_filter_step(low_pass_filter_t *xf,
-                                  low_pass_filter_t *dxf,
                                   float val,
                                   float timestamp,
                                   float min_cutoff,
@@ -86,7 +65,9 @@ static float one_euro_filter_step(low_pass_filter_t *xf,
   if (!xf->initialized)
     {
       xf->t_prev = timestamp;
+      xf->raw_prev = val;
       xf->x_prev = val;
+      xf->dx_prev = 0.0f;
       xf->initialized = true;
       return val;
     }
@@ -100,11 +81,17 @@ static float one_euro_filter_step(low_pass_filter_t *xf,
   xf->t_prev = timestamp;
 
   float rate = 1.0f / dt;
-  float dx = (val - xf->x_prev) * rate;
-  float edx = low_pass_filter_apply(dxf, dx, calc_alpha(rate, d_cutoff));
+  float dx = (val - xf->raw_prev) * rate;
+  xf->raw_prev = val;
+  float d_alpha = calc_alpha(rate, d_cutoff);
+  float edx = d_alpha * dx + (1.0f - d_alpha) * xf->dx_prev;
+  xf->dx_prev = edx;
 
   float cutoff = min_cutoff + beta * fabsf(edx);
-  return low_pass_filter_apply(xf, val, calc_alpha(rate, cutoff));
+  float alpha = calc_alpha(rate, cutoff);
+  float filtered = alpha * val + (1.0f - alpha) * xf->x_prev;
+  xf->x_prev = filtered;
+  return filtered;
 }
 
 /****************************************************************************
@@ -146,7 +133,7 @@ void one_euro_pose_filter_apply(one_euro_pose_filter_t *filter,
     {
       one_euro_point_t *pt = &filter->points[i];
       filtered_pose->kpts[i].x =
-        one_euro_filter_step(&pt->x_filt, &pt->x_filt,
+        one_euro_filter_step(&pt->x_filt,
                              raw_pose->kpts[i].x,
                              timestamp_sec,
                              pt->min_cutoff,
@@ -154,7 +141,7 @@ void one_euro_pose_filter_apply(one_euro_pose_filter_t *filter,
                              pt->d_cutoff);
 
       filtered_pose->kpts[i].y =
-        one_euro_filter_step(&pt->y_filt, &pt->y_filt,
+        one_euro_filter_step(&pt->y_filt,
                              raw_pose->kpts[i].y,
                              timestamp_sec,
                              pt->min_cutoff,

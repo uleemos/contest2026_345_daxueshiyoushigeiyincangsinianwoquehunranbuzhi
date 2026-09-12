@@ -174,21 +174,37 @@ int velafit_pipeline_step_camera_frame(velafit_pipeline_t *pipe,
     }
 
 #ifdef CONFIG_ESP32P4_PPA
-  /* Buffer for 160x160 AI model input */
+  /* Keep large image workspaces off the 8 KiB application stack.  Allocate
+   * two full RGB888-sized buffers so scale/rotate/CSC can always use
+   * distinct input and output regions.
+   */
 
-  uint8_t scaled_buf[160 * 160 * 3];
-  uint8_t rot_buf[160 * 160 * 3];
+  size_t workspace_size = VELAFIT_MODEL_INPUT_WIDTH *
+                          VELAFIT_MODEL_INPUT_HEIGHT *
+                          VELAFIT_MODEL_INPUT_CHANNELS;
+  uint8_t *scaled_buf = (uint8_t *)malloc(workspace_size);
+  uint8_t *aux_buf = (uint8_t *)malloc(workspace_size);
+  if (scaled_buf == NULL || aux_buf == NULL)
+    {
+      free(scaled_buf);
+      free(aux_buf);
+      return -ENOMEM;
+    }
+
   const void *cur_in = cam_frame;
-  void *cur_out = scaled_buf;
   int cur_fmt = color_fmt;
+  int ret;
 
   /* 1. Downscale camera frame (e.g. 720p -> 160x160) using PPA SRM */
 
-  int ret = esp32p4_ppa_scale(cur_in, cam_w, cam_h,
-                              cur_out, 160, 160, cur_fmt);
+  ret = esp32p4_ppa_scale(cur_in, cam_w, cam_h,
+                          scaled_buf,
+                          VELAFIT_MODEL_INPUT_WIDTH,
+                          VELAFIT_MODEL_INPUT_HEIGHT,
+                          cur_fmt);
   if (ret != OK)
     {
-      return ret;
+      goto out;
     }
 
   cur_in = scaled_buf;
@@ -197,30 +213,44 @@ int velafit_pipeline_step_camera_frame(velafit_pipeline_t *pipe,
 
   if (rotation != 0)
     {
-      ret = esp32p4_ppa_rotate(cur_in, 160, 160,
-                               rot_buf, rotation, cur_fmt);
-      if (ret == OK)
+      ret = esp32p4_ppa_rotate(cur_in,
+                               VELAFIT_MODEL_INPUT_WIDTH,
+                               VELAFIT_MODEL_INPUT_HEIGHT,
+                               aux_buf, rotation, cur_fmt);
+      if (ret != OK)
         {
-          cur_in = rot_buf;
+          goto out;
         }
+
+      cur_in = aux_buf;
     }
 
   /* 3. Convert to RGB888 for model inference if input is not RGB888 */
 
   if (cur_fmt != ESP32P4_PPA_COLOR_RGB888)
     {
-      ret = esp32p4_ppa_csc(cur_in, scaled_buf, 160, 160,
+      uint8_t *rgb_buf = cur_in == scaled_buf ? aux_buf : scaled_buf;
+      ret = esp32p4_ppa_csc(cur_in, rgb_buf,
+                            VELAFIT_MODEL_INPUT_WIDTH,
+                            VELAFIT_MODEL_INPUT_HEIGHT,
                             cur_fmt, ESP32P4_PPA_COLOR_RGB888);
-      if (ret == OK)
+      if (ret != OK)
         {
-          cur_in = scaled_buf;
+          goto out;
         }
+
+      cur_in = rgb_buf;
     }
 
   /* 4. Feed 160x160 image into AI model & pipeline step */
 
-  return velafit_pipeline_step_image(pipe, (const uint8_t *)cur_in,
-                                     timestamp_ms);
+  ret = velafit_pipeline_step_image(pipe, (const uint8_t *)cur_in,
+                                    timestamp_ms);
+
+out:
+  free(aux_buf);
+  free(scaled_buf);
+  return ret;
 #else
   return -ENOSYS;
 #endif
@@ -582,6 +612,24 @@ void velafit_pipeline_deinit(velafit_pipeline_t *pipe)
 }
 
 /****************************************************************************
+ * Name: velafit_pipeline_step_sample
+ *
+ * Description:
+ *   Feed deterministic samples with the simulation clock.  Sample fixtures
+ *   carry illustrative timestamps and must not be reused as live timestamps;
+ *   doing so makes the One-Euro filter receive zero/negative time deltas.
+ ****************************************************************************/
+
+static int velafit_pipeline_step_sample(velafit_pipeline_t *pipe,
+                                        const pose_frame_t *sample,
+                                        uint32_t timestamp_ms)
+{
+  pose_frame_t pose = *sample;
+  pose.timestamp_ms = timestamp_ms;
+  return velafit_pipeline_step_pose(pipe, &pose);
+}
+
+/****************************************************************************
  * Name: velafit_pipeline_run_simulation
  ****************************************************************************/
 
@@ -622,33 +670,42 @@ int velafit_pipeline_run_simulation(const char *exercise,
           /* Standard Deep Pushup */
 
           printf("  [Step 1] Standard Deep Pushup...\n");
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_pushup_plank);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_pushup_plank,
+                                       t_ms);
           t_ms += 200;
-          velafit_pipeline_step_pose(&pipe,
-                                     &g_sample_pose_pushup_bottom_deep);
+          velafit_pipeline_step_sample(&pipe,
+                                       &g_sample_pose_pushup_bottom_deep,
+                                       t_ms);
           t_ms += 400;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_pushup_plank);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_pushup_plank,
+                                       t_ms);
           t_ms += 300;
 
           /* Shallow Pushup */
 
           printf("  [Step 2] Shallow Pushup Fault...\n");
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_pushup_plank);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_pushup_plank,
+                                       t_ms);
           t_ms += 200;
-          velafit_pipeline_step_pose(&pipe,
-                                     &g_sample_pose_pushup_shallow);
+          velafit_pipeline_step_sample(&pipe,
+                                       &g_sample_pose_pushup_shallow,
+                                       t_ms);
           t_ms += 400;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_pushup_plank);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_pushup_plank,
+                                       t_ms);
           t_ms += 300;
 
           /* Sagging Hips Pushup */
 
           printf("  [Step 3] Sagging Hips Fault...\n");
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_pushup_plank);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_pushup_plank,
+                                       t_ms);
           t_ms += 200;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_pushup_sag);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_pushup_sag,
+                                       t_ms);
           t_ms += 400;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_pushup_plank);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_pushup_plank,
+                                       t_ms);
           t_ms += 300;
         }
     }
@@ -661,7 +718,8 @@ int velafit_pipeline_run_simulation(const char *exercise,
       printf("  [Phase 1] 5s Standard Horizontal Plank...\n");
       for (int i = 0; i < 5; i++)
         {
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_plank_perfect);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_plank_perfect,
+                                       t_ms);
           t_ms += 1000;
         }
 
@@ -670,7 +728,8 @@ int velafit_pipeline_run_simulation(const char *exercise,
       printf("  [Phase 2] 5s Sagging Hips Fault...\n");
       for (int i = 0; i < 5; i++)
         {
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_plank_sag);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_plank_sag,
+                                       t_ms);
           t_ms += 1000;
         }
 
@@ -679,7 +738,8 @@ int velafit_pipeline_run_simulation(const char *exercise,
       printf("  [Phase 3] 5s Piking Hips Fault...\n");
       for (int i = 0; i < 5; i++)
         {
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_plank_pike);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_plank_pike,
+                                       t_ms);
           t_ms += 1000;
         }
     }
@@ -692,35 +752,40 @@ int velafit_pipeline_run_simulation(const char *exercise,
           /* Standard Deep Squat */
 
           printf("  [Step 1] Standard Squat (Stand->Bottom->Stand)...\n");
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_standing);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_standing, t_ms);
           t_ms += 200;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_squat_shallow);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_squat_shallow,
+                                       t_ms);
           t_ms += 300;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_squat_deep);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_squat_deep,
+                                       t_ms);
           t_ms += 300;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_squat_shallow);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_squat_shallow,
+                                       t_ms);
           t_ms += 300;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_standing);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_standing, t_ms);
           t_ms += 200;
 
           /* Shallow Fault */
 
           printf("  [Step 2] Shallow Squat (Partial Squat)...\n");
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_standing);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_standing, t_ms);
           t_ms += 200;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_squat_shallow);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_squat_shallow,
+                                       t_ms);
           t_ms += 600;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_standing);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_standing, t_ms);
           t_ms += 500;
 
           /* Knee Valgus Fault */
 
           printf("  [Step 3] Knee Valgus Fault (Inward Caving)...\n");
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_standing);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_standing, t_ms);
           t_ms += 200;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_squat_valgus);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_squat_valgus,
+                                       t_ms);
           t_ms += 600;
-          velafit_pipeline_step_pose(&pipe, &g_sample_pose_standing);
+          velafit_pipeline_step_sample(&pipe, &g_sample_pose_standing, t_ms);
           t_ms += 500;
         }
     }
@@ -742,7 +807,16 @@ int velafit_pipeline_run_simulation(const char *exercise,
     }
   else
     {
-      printf("\n[4/5] Rendered to Framebuffer [OK]\n");
+      int fb_ret = velafit_render_to_fb0(&pipe.canvas);
+      if (fb_ret == OK)
+        {
+          printf("\n[4/5] Rendered to /dev/fb0 [OK]\n");
+        }
+      else
+        {
+          printf("\n[4/5] /dev/fb0 unavailable: %d "
+                 "[DISPLAY NOT VERIFIED]\n", fb_ret);
+        }
     }
 
   /* Generate Edge-Cloud JSON Report */
@@ -756,6 +830,6 @@ int velafit_pipeline_run_simulation(const char *exercise,
   printf("-------------------------------------------------------\n");
 
   velafit_pipeline_deinit(&pipe);
-  printf("\n>>> [Pipeline Simulation: PASS]\n\n");
+  printf("\n>>> [Pipeline Simulation: COMPLETED]\n\n");
   return OK;
 }

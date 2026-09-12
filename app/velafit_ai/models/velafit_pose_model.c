@@ -25,26 +25,17 @@
  ****************************************************************************/
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <errno.h>
 
 #include "velafit_pose_model.h"
-#include "esp_nn_ops.h"
 #include "sample_pose_frames.h"
-
-/****************************************************************************
- * Pre-processor Definitions
- ****************************************************************************/
-
-#define TENSOR_ARENA_SIZE  (256 * 1024)
 
 /****************************************************************************
  * Private Data
  ****************************************************************************/
 
-static uint8_t *g_tensor_arena = NULL;
 static bool g_model_initialized = false;
 
 /****************************************************************************
@@ -62,17 +53,14 @@ int velafit_pose_model_init(void)
       return OK;
     }
 
-  g_tensor_arena = (uint8_t *)malloc(TENSOR_ARENA_SIZE);
-  if (!g_tensor_arena)
-    {
-      printf("Error: Failed to allocate Tensor Arena (%d bytes)\n",
-             TENSOR_ARENA_SIZE);
-      return -ENOMEM;
-    }
-
-  memset(g_tensor_arena, 0, TENSOR_ARENA_SIZE);
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_SIMULATION
+  printf("[VELAFIT-POSE] Backend: SIMULATION (no image inference)\n");
   g_model_initialized = true;
   return OK;
+#else
+  printf("[VELAFIT-POSE] Backend unavailable: real inference not integrated\n");
+  return -ENOSYS;
+#endif
 }
 
 /****************************************************************************
@@ -81,13 +69,29 @@ int velafit_pose_model_init(void)
 
 void velafit_pose_model_deinit(void)
 {
-  if (g_tensor_arena)
-    {
-      free(g_tensor_arena);
-      g_tensor_arena = NULL;
-    }
-
   g_model_initialized = false;
+}
+
+/****************************************************************************
+ * Name: velafit_pose_model_backend_name
+ ****************************************************************************/
+
+const char *velafit_pose_model_backend_name(void)
+{
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_SIMULATION
+  return "simulation";
+#else
+  return "none";
+#endif
+}
+
+/****************************************************************************
+ * Name: velafit_pose_model_backend_is_real
+ ****************************************************************************/
+
+bool velafit_pose_model_backend_is_real(void)
+{
+  return false;
 }
 
 /****************************************************************************
@@ -98,93 +102,38 @@ int velafit_pose_infer(const uint8_t *rgb_image,
                        pose_frame_t *out_pose,
                        velafit_perf_t *perf)
 {
+  if (rgb_image == NULL || out_pose == NULL)
+    {
+      return -EINVAL;
+    }
+
   if (!g_model_initialized)
     {
-      if (velafit_pose_model_init() != 0)
+      int ret = velafit_pose_model_init();
+      if (ret != OK)
         {
-          return -ENOMEM;
+          return ret;
         }
     }
 
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_SIMULATION
   struct timespec t0;
-  struct timespec t1;
-  struct timespec t2;
   struct timespec t3;
 
   clock_gettime(CLOCK_MONOTONIC, &t0);
-
-  /* 1. Preprocessing: RGB [0, 255] -> INT8 [-128, 127] */
-
-  int8_t *input_int8 = (int8_t *)g_tensor_arena;
-  int32_t total_pixels = VELAFIT_MODEL_INPUT_WIDTH *
-                         VELAFIT_MODEL_INPUT_HEIGHT *
-                         VELAFIT_MODEL_INPUT_CHANNELS;
-  for (int32_t i = 0; i < total_pixels; i++)
-    {
-      input_int8[i] = (int8_t)((int32_t)rgb_image[i] - 128);
-    }
-
-  clock_gettime(CLOCK_MONOTONIC, &t1);
-
-  /* 2. Forward Inference through INT8 Quantized Network */
-
-  esp_nn_dims_t in_dims =
-    {
-      1, 160, 160, 3
-    };
-
-  esp_nn_dims_t out_dims =
-    {
-      1, 80, 80, 16
-    };
-
-  esp_nn_quant_params_t q =
-    {
-      1073741824, 0, 0, 0, -128, 127
-    };
-
-  int8_t *conv1_out = (int8_t *)(g_tensor_arena + total_pixels);
-  int8_t *filter_weights = (int8_t *)(conv1_out + (80 * 80 * 16));
-
-  /* Run stem conv layer */
-
-  esp_nn_conv_s8(input_int8, &in_dims, filter_weights, NULL,
-                 3, 3, 16, 2, 2, 1, 1, &q, conv1_out, &out_dims);
-
-  /* Run depthwise conv block */
-
-  esp_nn_dims_t dw_out_dims =
-    {
-      1, 80, 80, 16
-    };
-
-  esp_nn_depthwise_conv_s8(conv1_out, &out_dims, filter_weights, NULL,
-                           3, 3, 1, 1, 1, 1, &q, input_int8, &dw_out_dims);
-
-  clock_gettime(CLOCK_MONOTONIC, &t2);
-
-  /* 3. Postprocessing & Output Regressor: Extract 17 Keypoints */
-
   memcpy(out_pose, &g_sample_pose_squat_deep, sizeof(pose_frame_t));
   out_pose->valid = true;
-
   clock_gettime(CLOCK_MONOTONIC, &t3);
-
-  /* Calculate Performance Profiling */
 
   if (perf)
     {
-      perf->preprocess_us = (t1.tv_sec - t0.tv_sec) * 1000000 +
-                            (t1.tv_nsec - t0.tv_nsec) / 1000;
-      perf->infer_us      = (t2.tv_sec - t1.tv_sec) * 1000000 +
-                            (t2.tv_nsec - t1.tv_nsec) / 1000;
-      perf->postprocess_us = (t3.tv_sec - t2.tv_sec) * 1000000 +
-                             (t3.tv_nsec - t2.tv_nsec) / 1000;
+      memset(perf, 0, sizeof(*perf));
       perf->total_us      = (t3.tv_sec - t0.tv_sec) * 1000000 +
                             (t3.tv_nsec - t0.tv_nsec) / 1000;
-      perf->fps           = (perf->total_us > 0) ?
-                            (1000000.0f / (float)perf->total_us) : 0.0f;
     }
 
   return OK;
+#else
+  return -ENOSYS;
+#endif
 }

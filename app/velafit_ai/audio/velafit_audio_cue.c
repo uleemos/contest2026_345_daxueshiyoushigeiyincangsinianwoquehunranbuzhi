@@ -33,7 +33,9 @@
 #include <math.h>
 #include <sys/ioctl.h>
 
-#include <nuttx/audio/audio.h>
+#ifdef CONFIG_AUDIO
+#  include <nuttx/audio/audio.h>
+#endif
 
 #include "velafit_audio_cue.h"
 
@@ -250,6 +252,7 @@ static int play_notes_hardware(const audio_note_t *notes,
                                int num_notes,
                                int volume_pct)
 {
+#ifdef CONFIG_AUDIO
   int fd = open(VELAFIT_PCM_DEVICE, O_WRONLY);
   if (fd < 0)
     {
@@ -382,6 +385,12 @@ static int play_notes_hardware(const audio_note_t *notes,
   ioctl(fd, AUDIOIOC_FREEBUFFER, (unsigned long)&buf_desc);
   close(fd);
   return OK;
+#else
+  (void)notes;
+  (void)num_notes;
+  (void)volume_pct;
+  return -ENODEV;
+#endif
 }
 
 /****************************************************************************
