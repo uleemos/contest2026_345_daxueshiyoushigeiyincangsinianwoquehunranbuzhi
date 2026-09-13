@@ -10,6 +10,8 @@ Make.dep
 *.hex
 *.elf
 *.map
+__pycache__/
+*.pyc
 
 # Local credentials (never commit)
 .secrets/

@@ -4,6 +4,20 @@ These host-side scripts require Python 3 and `pyserial` on the host that owns
 the USB Serial/JTAG COM port.  On the current Windows/WSL setup they are run
 with Windows Python and `--port COM3`.
 
+For the ESP32-C6 IP data-plane acceptance, keep credentials in the ignored
+`.secrets/velafit.env` and run from Windows PowerShell (the script redacts the
+password before writing its transcript):
+
+```powershell
+py tools/hardware/c6_ip_acceptance.py --port COM3 `
+  --env .secrets/velafit.env `
+  --log hardware-logs/c6-ip-data-plane-20260913-final.log
+```
+
+This checks association/`eth0`, DHCP, DNS, external ICMP and a TCP connection
+to `api.xiaomimimo.com:443`. It does not perform TLS or an authenticated API
+request.
+
 Run one or more NSH commands and retain the transcript:
 
 ```powershell
