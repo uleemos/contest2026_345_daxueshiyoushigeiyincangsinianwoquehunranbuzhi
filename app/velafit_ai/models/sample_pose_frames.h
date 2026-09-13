@@ -60,6 +60,11 @@ extern const pose_frame_t g_sample_pose_jj_open;
 
 extern const uint8_t g_sample_test_image_160x160[160 * 160 * 3];
 
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+extern const uint8_t g_velafit_pose_fixture_rgb192[192 * 192 * 3];
+extern const uint32_t g_velafit_pose_fixture_rgb192_size;
+#endif
+
 #ifdef __cplusplus
 }
 #endif

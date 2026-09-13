@@ -36,8 +36,8 @@
  ****************************************************************************/
 
 #define VELAFIT_NUM_KEYPOINTS        17
-#define VELAFIT_MODEL_INPUT_WIDTH    160
-#define VELAFIT_MODEL_INPUT_HEIGHT   160
+#define VELAFIT_MODEL_INPUT_WIDTH    192
+#define VELAFIT_MODEL_INPUT_HEIGHT   192
 #define VELAFIT_MODEL_INPUT_CHANNELS 3
 
 /****************************************************************************

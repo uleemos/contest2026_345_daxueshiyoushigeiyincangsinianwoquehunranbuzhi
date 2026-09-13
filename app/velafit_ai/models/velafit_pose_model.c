@@ -32,6 +32,10 @@
 #include "velafit_pose_model.h"
 #include "sample_pose_frames.h"
 
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+#  include "velafit_pose_tflm.h"
+#endif
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -53,7 +57,16 @@ int velafit_pose_model_init(void)
       return OK;
     }
 
-#ifdef CONFIG_VELAFIT_POSE_BACKEND_SIMULATION
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+  int ret = velafit_pose_tflm_init();
+  if (ret == OK)
+    {
+      printf("[VELAFIT-POSE] Backend: TFLM MoveNet (real inference)\n");
+      g_model_initialized = true;
+    }
+
+  return ret;
+#elif defined(CONFIG_VELAFIT_POSE_BACKEND_SIMULATION)
   printf("[VELAFIT-POSE] Backend: SIMULATION (no image inference)\n");
   g_model_initialized = true;
   return OK;
@@ -69,6 +82,9 @@ int velafit_pose_model_init(void)
 
 void velafit_pose_model_deinit(void)
 {
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+  velafit_pose_tflm_deinit();
+#endif
   g_model_initialized = false;
 }
 
@@ -78,7 +94,9 @@ void velafit_pose_model_deinit(void)
 
 const char *velafit_pose_model_backend_name(void)
 {
-#ifdef CONFIG_VELAFIT_POSE_BACKEND_SIMULATION
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+  return "tflm-movenet-lightning-int8-v4";
+#elif defined(CONFIG_VELAFIT_POSE_BACKEND_SIMULATION)
   return "simulation";
 #else
   return "none";
@@ -91,7 +109,11 @@ const char *velafit_pose_model_backend_name(void)
 
 bool velafit_pose_model_backend_is_real(void)
 {
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+  return true;
+#else
   return false;
+#endif
 }
 
 /****************************************************************************
@@ -116,7 +138,9 @@ int velafit_pose_infer(const uint8_t *rgb_image,
         }
     }
 
-#ifdef CONFIG_VELAFIT_POSE_BACKEND_SIMULATION
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+  return velafit_pose_tflm_infer(rgb_image, out_pose, perf);
+#elif defined(CONFIG_VELAFIT_POSE_BACKEND_SIMULATION)
   struct timespec t0;
   struct timespec t3;
 

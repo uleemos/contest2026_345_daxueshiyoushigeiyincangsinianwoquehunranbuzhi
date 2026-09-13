@@ -91,7 +91,7 @@ int velafit_pipeline_init(velafit_pipeline_t *pipe,
                           uint32_t canvas_h);
 
 int velafit_pipeline_step_image(velafit_pipeline_t *pipe,
-                                const uint8_t *img_160x160,
+                                const uint8_t *model_rgb,
                                 uint32_t timestamp_ms);
 
 int velafit_pipeline_step_camera_frame(velafit_pipeline_t *pipe,

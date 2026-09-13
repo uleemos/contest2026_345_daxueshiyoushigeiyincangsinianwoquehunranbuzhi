@@ -135,10 +135,10 @@ int velafit_pipeline_init(velafit_pipeline_t *pipe,
  ****************************************************************************/
 
 int velafit_pipeline_step_image(velafit_pipeline_t *pipe,
-                                const uint8_t *img_160x160,
+                                const uint8_t *model_rgb,
                                 uint32_t timestamp_ms)
 {
-  if (pipe == NULL || img_160x160 == NULL)
+  if (pipe == NULL || model_rgb == NULL)
     {
       return -EINVAL;
     }
@@ -146,7 +146,7 @@ int velafit_pipeline_step_image(velafit_pipeline_t *pipe,
   pose_frame_t raw_pose;
   velafit_perf_t perf;
 
-  int ret = velafit_pose_infer(img_160x160, &raw_pose, &perf);
+  int ret = velafit_pose_infer(model_rgb, &raw_pose, &perf);
   if (ret != OK)
     {
       return ret;
@@ -195,7 +195,7 @@ int velafit_pipeline_step_camera_frame(velafit_pipeline_t *pipe,
   int cur_fmt = color_fmt;
   int ret;
 
-  /* 1. Downscale camera frame (e.g. 720p -> 160x160) using PPA SRM */
+  /* 1. Downscale camera frame to the selected model dimensions. */
 
   ret = esp32p4_ppa_scale(cur_in, cam_w, cam_h,
                           scaled_buf,
@@ -209,7 +209,7 @@ int velafit_pipeline_step_camera_frame(velafit_pipeline_t *pipe,
 
   cur_in = scaled_buf;
 
-  /* 2. Rotate 160x160 if needed */
+  /* 2. Rotate the square model input if needed. */
 
   if (rotation != 0)
     {
@@ -242,7 +242,7 @@ int velafit_pipeline_step_camera_frame(velafit_pipeline_t *pipe,
       cur_in = rgb_buf;
     }
 
-  /* 4. Feed 160x160 image into AI model & pipeline step */
+  /* 4. Feed the RGB888 image into AI model & pipeline step. */
 
   ret = velafit_pipeline_step_image(pipe, (const uint8_t *)cur_in,
                                     timestamp_ms);

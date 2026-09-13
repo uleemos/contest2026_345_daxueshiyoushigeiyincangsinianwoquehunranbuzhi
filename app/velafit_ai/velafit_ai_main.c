@@ -110,7 +110,13 @@ static int cmd_test_pose(void)
   velafit_perf_t perf;
   pose_frame_t detected_pose;
 
-  int ret = velafit_pose_infer(g_sample_test_image_160x160,
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+  const uint8_t *test_image = g_velafit_pose_fixture_rgb192;
+#else
+  const uint8_t *test_image = g_sample_test_image_160x160;
+#endif
+
+  int ret = velafit_pose_infer(test_image,
                                &detected_pose, &perf);
   if (ret != 0)
     {
@@ -162,10 +168,21 @@ static int cmd_test_pose(void)
          (unsigned long)perf.postprocess_us);
   printf("  Total Latency    : %lu us (approx %.1f FPS)\n",
          (unsigned long)perf.total_us, perf.fps);
-  printf(">>> [Stage 2] Pose %s Test: [%s PASS]\n\n",
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+  bool latency_pass = perf.infer_us <=
+                      (uint32_t)CONFIG_VELAFIT_POSE_MAX_INFER_MS * 1000u;
+  printf("  Performance Gate : %lu ms <= %d ms [%s]\n",
+         (unsigned long)(perf.infer_us / 1000u),
+         CONFIG_VELAFIT_POSE_MAX_INFER_MS,
+         latency_pass ? "PASS" : "FAIL");
+#else
+  bool latency_pass = true;
+#endif
+  printf(">>> [Stage 2] Pose %s Test: [%s]\n\n",
          is_real ? "Inference" : "Simulation",
-         is_real ? "INFERENCE" : "SIMULATION");
-  return 0;
+         latency_pass ? (is_real ? "INFERENCE PASS" : "SIMULATION PASS") :
+                        "PERFORMANCE FAIL");
+  return latency_pass ? 0 : -ETIME;
 }
 
 /****************************************************************************

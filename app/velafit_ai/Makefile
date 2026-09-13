@@ -6,7 +6,7 @@ include $(APPDIR)/Make.defs
 
 PROGNAME  = velafit_ai
 PRIORITY  = SCHED_PRIORITY_DEFAULT
-STACKSIZE = 8192
+STACKSIZE = 32768
 MODULE    = $(CONFIG_LVX_USE_DEMO_CONTEST2026_345_VELAFIT_AI)
 
 CFLAGS += -I$(APPDIR)/packages/demos/contest2026_345_velafit_ai/include
@@ -20,6 +20,20 @@ CFLAGS += -I$(APPDIR)/packages/demos/contest2026_345_velafit_ai/sync
 CFLAGS += -I$(APPDIR)/packages/demos/contest2026_345_velafit_ai/pipeline
 CFLAGS += -I$(APPDIR)/packages/demos/contest2026_345_velafit_ai/plan
 CFLAGS += -I$(TOPDIR)/arch/risc-v/src/esp32p4
+
+ifneq ($(CONFIG_VELAFIT_POSE_BACKEND_TFLM),)
+CXXEXT = .cc
+CXXFLAGS += -I$(APPDIR)/mlearning/tflite-micro/tflite-micro
+CXXFLAGS += -I$(APPDIR)/math/gemmlowp/gemmlowp
+CXXFLAGS += -I$(APPDIR)/math/kissfft/kissfft
+CXXFLAGS += -I$(APPDIR)/math/ruy/ruy
+CXXFLAGS += -I$(APPDIR)/packages/demos/contest2026_345_velafit_ai/include
+CXXFLAGS += -I$(APPDIR)/packages/demos/contest2026_345_velafit_ai/models
+CXXFLAGS += -DTFLITE_EMULATE_FLOAT -DTF_LITE_DISABLE_X86_NEON
+CXXFLAGS += -Wno-shadow -Wno-sign-compare -Wno-undef -Wno-unused-variable
+CXXSRCS += models/velafit_pose_tflm.cc
+ASRCS += models/velafit_pose_fixture.S
+endif
 
 CSRCS += engine/esp_nn_ops.c
 CSRCS += engine/velafit_ppa_bench.c
