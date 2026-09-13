@@ -67,7 +67,7 @@
 #define ESP_HOSTED_TX_BUF_SIZE    1536
 #define ESP_HOSTED_NEW_PACKET     (1u << 23)
 #define ESP_HOSTED_OPEN_DATA_PATH 0
-#define ESP_HOSTED_RX_MAX         8192
+#define ESP_HOSTED_RX_MAX         65536
 #define ESP_HOSTED_RX_RETRIES     100
 
 #define ESP_HOSTED_STA_IF         1
@@ -93,7 +93,7 @@
 
 #define C6_NET_MTU                1500
 #define C6_NET_FRAME_MAX          (C6_NET_MTU + 14)
-#define C6_NET_RX_QUOTA           4
+#define C6_NET_RX_QUOTA           16
 #define C6_NET_RX_POLL_MS         10
 #define C6_NET_RX_PRIORITY        100
 #define C6_NET_RX_STACKSIZE       4096
@@ -789,7 +789,9 @@ static int board_c6_hosted_receive(FAR struct sdio_dev_s *dev,
       if ((header->interface & 0x0f) == ESP_HOSTED_STA_IF)
         {
           board_c6_net_enqueue(payload, header->len);
-          continue;
+          *msgid = 0;
+          *uid = 0;
+          return OK;
         }
 
       if ((header->interface & 0x0f) != ESP_HOSTED_SERIAL_IF)
@@ -1456,6 +1458,12 @@ static int board_c6_net_rxthread(int argc, FAR char *argv[])
               board_c6_net_set_connected(false);
               syslog(LOG_ERR, "ERROR: ESP32-C6 Wi-Fi carrier lost\n");
             }
+
+          /* Drain an aggregate promptly and release the transport lock
+           * between frames so TCP ACK transmission is not starved.
+           */
+
+          continue;
         }
       else if (ret != -ETIMEDOUT)
         {

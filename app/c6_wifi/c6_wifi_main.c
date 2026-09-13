@@ -19,13 +19,34 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <arch/board/board.h>
+#include <netutils/ntpclient.h>
+
+#include "c6_mimo_tls.h"
+
+/****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
+
+#define C6_WIFI_VALID_TIME_MIN 1704067200 /* 2024-01-01 UTC */
+#define C6_WIFI_NTP_WAIT_SEC   20
 
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+static void c6_wifi_secure_zero(FAR void *buffer, size_t size)
+{
+  FAR volatile unsigned char *cursor = buffer;
+
+  while (size-- > 0)
+    {
+      *cursor++ = 0;
+    }
+}
 
 static int c6_wifi_read_line(FAR const char *prompt, FAR char *buffer,
                              size_t size, bool secret)
@@ -143,6 +164,42 @@ static int c6_wifi_tcp_probe(FAR const char *host, FAR const char *service)
   return ret;
 }
 
+static int c6_wifi_sync_time(void)
+{
+  time_t now;
+  int ret;
+  int seconds;
+
+  now = time(NULL);
+  if (now >= C6_WIFI_VALID_TIME_MIN)
+    {
+      printf("NTP time ready: epoch=%lld\n", (long long)now);
+      return OK;
+    }
+
+  ret = ntpc_start();
+  if (ret < 0)
+    {
+      fprintf(stderr, "NTP start FAIL: %d\n", ret);
+      return ret;
+    }
+
+  for (seconds = 0; seconds < C6_WIFI_NTP_WAIT_SEC; seconds++)
+    {
+      sleep(1);
+      now = time(NULL);
+      if (now >= C6_WIFI_VALID_TIME_MIN)
+        {
+          printf("NTP time PASS: epoch=%lld wait_seconds=%d\n",
+                 (long long)now, seconds + 1);
+          return OK;
+        }
+    }
+
+  fprintf(stderr, "NTP time FAIL: clock is not trustworthy\n");
+  return -ETIMEDOUT;
+}
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -154,22 +211,28 @@ int main(int argc, FAR char *argv[])
   uint32_t patch;
   char ssid[33];
   char password[65];
+  char api_key[160];
+  struct c6_mimo_result_s mimo_result;
   FAR const char *connect_ssid;
   FAR const char *connect_password;
   FAR const char *ifname;
   int ret;
 
-  if ((argc != 2 ||
-       (strcmp(argv[1], "probe") != 0 &&
-        strcmp(argv[1], "version") != 0 &&
-        strcmp(argv[1], "connect") != 0)) &&
-      (argc != 4 ||
-       (strcmp(argv[1], "connect") != 0 &&
-        strcmp(argv[1], "tcp") != 0)))
+  if (!((argc == 2 &&
+         (strcmp(argv[1], "probe") == 0 ||
+          strcmp(argv[1], "version") == 0 ||
+          strcmp(argv[1], "connect") == 0 ||
+          strcmp(argv[1], "tls") == 0 ||
+          strcmp(argv[1], "mimo") == 0)) ||
+        (argc == 3 && strcmp(argv[1], "tls") == 0) ||
+        (argc == 4 &&
+         (strcmp(argv[1], "connect") == 0 ||
+          strcmp(argv[1], "tcp") == 0))))
     {
       fprintf(stderr,
               "Usage: c6_wifi {probe|version|connect "
-              "[<ssid> <password>]|tcp <host> <port>}\n");
+              "[<ssid> <password>]|tcp <host> <port>|"
+              "tls [<verify-host>]|mimo}\n");
       return 1;
     }
 
@@ -189,6 +252,59 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "tcp") == 0)
     {
       return c6_wifi_tcp_probe(argv[2], argv[3]);
+    }
+
+  if (strcmp(argv[1], "tls") == 0)
+    {
+      ret = c6_wifi_sync_time();
+      if (ret < 0)
+        {
+          return 1;
+        }
+
+      ret = c6_mimo_tls_probe(argc == 3 ? argv[2] :
+                              "api.xiaomimimo.com");
+      return ret == OK ? 0 : 1;
+    }
+
+  if (strcmp(argv[1], "mimo") == 0)
+    {
+      ret = c6_wifi_sync_time();
+      if (ret < 0)
+        {
+          return 1;
+        }
+
+      ret = c6_wifi_read_line("MiMo API key (hidden): ", api_key,
+                              sizeof(api_key), true);
+      if (ret < 0)
+        {
+          return 1;
+        }
+
+      if (strncmp(api_key, "sk-", 3) != 0)
+        {
+          c6_wifi_secure_zero(api_key, sizeof(api_key));
+          fprintf(stderr, "MiMo API key rejected: ordinary sk- key required\n");
+          return 1;
+        }
+
+      ret = c6_mimo_chat(api_key, &mimo_result);
+      c6_wifi_secure_zero(api_key, sizeof(api_key));
+      if (ret < 0)
+        {
+          fprintf(stderr, "MiMo device request FAIL: error=%d status=%d\n",
+                  ret, mimo_result.http_status);
+          return 1;
+        }
+
+      printf("MiMo device PASS: status=%d latency_ms=%lu "
+             "reasoning_chars=%lu id=%s\n",
+             mimo_result.http_status, mimo_result.elapsed_ms,
+             (unsigned long)mimo_result.reasoning_chars,
+             mimo_result.response_id);
+      printf("MiMo response: %s\n", mimo_result.content);
+      return 0;
     }
 
   if (strcmp(argv[1], "connect") == 0)
@@ -222,7 +338,7 @@ int main(int argc, FAR char *argv[])
         }
 
       ret = board_c6_wifi_connect(connect_ssid, connect_password);
-      memset(password, 0, sizeof(password));
+      c6_wifi_secure_zero(password, sizeof(password));
       if (ret < 0)
         {
           fprintf(stderr, "ESP32-C6 Wi-Fi connect failed: %d\n", ret);
