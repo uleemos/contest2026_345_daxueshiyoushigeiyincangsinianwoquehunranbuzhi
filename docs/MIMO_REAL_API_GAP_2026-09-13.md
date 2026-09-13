@@ -95,10 +95,10 @@ deployment or paid public service is authorized by this audit.
 
 ## Recommended sequence
 
-1. **P0 — computer real-API smoke:** after the ordinary key is placed in the
-   ignored local environment file, send one minimal text request. Record time,
-   execution location, model, HTTP status, latency, request ID if returned, and
-   a redacted/short response. This proves account/auth/API only.
+1. **P0 — computer real-API smoke: COMPLETE.** An ordinary-key request produced
+   a validated non-empty `mimo-v2.5` response on 2026-09-13. See
+   `artifacts/hardware/2026-09-13-headless/MIMO_PC_API_ACCEPTANCE.md`. This proves
+   account/auth/API only.
 2. **P0 — C6 IP data plane:** netdev RX/TX, DHCP, DNS, ping/TCP, reconnect, and
    repeated transfer stability. Association alone is not completion.
 3. **P0 — device TLS:** CA trust, SNI and hostname validation, valid/invalid
