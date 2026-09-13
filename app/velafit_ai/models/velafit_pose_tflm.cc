@@ -18,6 +18,7 @@
 
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/micro/micro_profiler_interface.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
 #include "velafit_pose_tflm.h"
@@ -50,6 +51,94 @@ uint64_t monotonic_us()
          static_cast<uint64_t>(ts.tv_sec) * 1000000ull +
          static_cast<uint64_t>(ts.tv_nsec) / 1000ull : 0;
 }
+
+#ifdef CONFIG_VELAFIT_POSE_OPERATOR_PROFILE
+class OperatorProfiler final : public tflite::MicroProfilerInterface
+{
+ public:
+  static constexpr unsigned int kMaxTags = 24;
+
+  uint32_t BeginEvent(const char *tag) override
+  {
+    unsigned int slot = 0;
+    for (; slot < used_; slot++)
+      {
+        if (std::strcmp(entries_[slot].tag, tag) == 0)
+          {
+            break;
+          }
+      }
+
+    if (slot == used_)
+      {
+        if (used_ == kMaxTags)
+          {
+            overflow_++;
+            return UINT32_MAX;
+          }
+
+        entries_[slot].tag = tag;
+        used_++;
+      }
+
+    entries_[slot].started_us = monotonic_us();
+    return slot;
+  }
+
+  void EndEvent(uint32_t handle) override
+  {
+    if (handle >= used_)
+      {
+        return;
+      }
+
+    Entry &entry = entries_[handle];
+    entry.total_us += monotonic_us() - entry.started_us;
+    entry.calls++;
+  }
+
+  void Reset()
+  {
+    std::memset(entries_, 0, sizeof(entries_));
+    used_ = 0;
+    overflow_ = 0;
+  }
+
+  void Report(uint64_t invoke_us) const
+  {
+    std::printf("[VELAFIT-PROFILE] operator,count,total_us,avg_us,invoke_pct\n");
+    for (unsigned int i = 0; i < used_; i++)
+      {
+        const Entry &entry = entries_[i];
+        const uint64_t average = entry.calls == 0 ? 0 :
+                                 entry.total_us / entry.calls;
+        const double percentage = invoke_us == 0 ? 0.0 :
+                                  100.0 * entry.total_us / invoke_us;
+        std::printf("[VELAFIT-PROFILE] %s,%lu,%llu,%llu,%.2f\n",
+                    entry.tag, static_cast<unsigned long>(entry.calls),
+                    static_cast<unsigned long long>(entry.total_us),
+                    static_cast<unsigned long long>(average), percentage);
+      }
+
+    std::printf("[VELAFIT-PROFILE] tags=%u overflow=%u\n", used_, overflow_);
+  }
+
+ private:
+  struct Entry
+  {
+    const char *tag;
+    uint64_t started_us;
+    uint64_t total_us;
+    uint32_t calls;
+  };
+
+  Entry entries_[kMaxTags]{};
+  unsigned int used_ = 0;
+  unsigned int overflow_ = 0;
+};
+
+OperatorProfiler g_profiler;
+#endif
 
 bool shape_is(const TfLiteTensor *tensor, const int *dims, size_t count)
 {
@@ -140,7 +229,13 @@ extern "C" int velafit_pose_tflm_init(void)
 
   g_interpreter = new (std::nothrow) tflite::MicroInterpreter(
     model, *g_resolver, static_cast<uint8_t *>(g_arena),
-    CONFIG_VELAFIT_TFLM_RUNNER_ARENA_SIZE);
+    CONFIG_VELAFIT_TFLM_RUNNER_ARENA_SIZE, nullptr,
+#ifdef CONFIG_VELAFIT_POSE_OPERATOR_PROFILE
+    &g_profiler
+#else
+    nullptr
+#endif
+    );
   if (g_interpreter == nullptr ||
       g_interpreter->AllocateTensors() != kTfLiteOk)
     {
@@ -186,12 +281,19 @@ extern "C" int velafit_pose_tflm_infer(const uint8_t *rgb192,
   std::memcpy(input->data.uint8, rgb192, input->bytes);
   const uint64_t invoke_start = monotonic_us();
 
+#ifdef CONFIG_VELAFIT_POSE_OPERATOR_PROFILE
+  g_profiler.Reset();
+#endif
+
   if (g_interpreter->Invoke() != kTfLiteOk)
     {
       return -EIO;
     }
 
   const uint64_t post_start = monotonic_us();
+#ifdef CONFIG_VELAFIT_POSE_OPERATOR_PROFILE
+  g_profiler.Report(post_start - invoke_start);
+#endif
   unsigned int confident = 0;
   std::memset(out_pose, 0, sizeof(*out_pose));
 

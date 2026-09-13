@@ -1,0 +1,68 @@
+
+nsh> [
+===== COMMAND: velafit_ai test_pose =====
+velafit_ai test_pose
+
+>>> [Stage 2] Running Static Pose Inference...
+  Backend          : tflm-movenet-lightning-int8-v4 (REAL INFERENCE)
+[VELAFIT-TFLM] init PASS model=2894840 arena=3145728
+[VELAFIT-POSE] Backend: TFLM MoveNet (real inference)
+[VELAFIT-PROFILE] operator,count,total_us,avg_us,invoke_pct
+[VELAFIT-PROFILE] CAST,5,10000,2000,0.02
+[VELAFIT-PROFILE] QUANTIZE,8,140000,17500,0.28
+[VELAFIT-PROFILE] SUB,6,200000,33333,0.40
+[VELAFIT-PROFILE] MUL,7,60000,8571,0.12
+[VELAFIT-PROFILE] CONV_2D,50,45420000,908400,90.44
+[VELAFIT-PROFILE] DEPTHWISE_CONV_2D,24,3940000,164166,7.85
+[VELAFIT-PROFILE] ADD,19,180000,9473,0.36
+[VELAFIT-PROFILE] RESIZE_BILINEAR,3,50000,16666,0.10
+[VELAFIT-PROFILE] LOGISTIC,2,40000,20000,0.08
+[VELAFIT-PROFILE] RESHAPE,12,0,0,0.00
+[VELAFIT-PROFILE] ARG_MAX,2,0,0,0.00
+[VELAFIT-PROFILE] FLOOR_DIV,2,10000,5000,0.02
+[VELAFIT-PROFILE] PACK,3,0,0,0.00
+[VELAFIT-PROFILE] DEQUANTIZE,4,80000,20000,0.16
+[VELAFIT-PROFILE] GATHER_ND,4,0,0,0.00
+[VELAFIT-PROFILE] UNPACK,2,0,0,0.00
+[VELAFIT-PROFILE] SQRT,1,70000,70000,0.14
+[VELAFIT-PROFILE] DIV,1,20000,20000,0.04
+[VELAFIT-PROFILE] CONCATENATION,2,0,0,0.00
+[VELAFIT-PROFILE] tags=19 overflow=0
+[VELAFIT-TFLM] output PASS confident=17/17 valid=yes
+
+--- 17 Human Keypoint Detections ---
+  [00] Nose         : (X: 0.569, Y: 0.344)  Score: 0.80
+  [01] L_Eye        : (X: 0.569, Y: 0.320)  Score: 0.93
+  [02] R_Eye        : (X: 0.541, Y: 0.311)  Score: 0.57
+  [03] L_Ear        : (X: 0.549, Y: 0.315)  Score: 0.64
+  [04] R_Ear        : (X: 0.496, Y: 0.311)  Score: 0.75
+  [05] L_Shoulder   : (X: 0.557, Y: 0.422)  Score: 0.80
+  [06] R_Shoulder   : (X: 0.442, Y: 0.401)  Score: 0.84
+  [07] L_Elbow      : (X: 0.664, Y: 0.508)  Score: 0.88
+  [08] R_Elbow      : (X: 0.512, Y: 0.508)  Score: 0.84
+  [09] L_Wrist      : (X: 0.647, Y: 0.418)  Score: 0.43
+  [10] R_Wrist      : (X: 0.602, Y: 0.414)  Score: 0.91
+  [11] L_Hip        : (X: 0.389, Y: 0.619)  Score: 0.91
+  [12] R_Hip        : (X: 0.299, Y: 0.602)  Score: 0.93
+  [13] L_Knee       : (X: 0.574, Y: 0.643)  Score: 0.84
+  [14] R_Knee       : (X: 0.434, Y: 0.680)  Score: 0.84
+  [15] L_Ankle      : (X: 0.508, Y: 0.848)  Score: 0.57
+  [16] R_Ankle      : (X: 0.365, Y: 0.901)  Score: 0.93
+
+--- Geometric Angles & Posture Features ---
+  Left Knee Angle  : 79.8 deg
+  Right Knee Angle : 102.5 deg
+  Left Hip Angle   : 57.1 deg
+  Right Hip Angle  : 84.4 deg
+  Trunk Lean Angle : 38.1 deg
+  Knee/Ankle Ratio : 0.94 (Threshold > 0.72)
+
+--- Backend Profiling Metrics ---
+  Preprocess       : 10000 us
+  Forward Infer    : 50220000 us
+  Postprocess      : 50000 us
+  Total Latency    : 50280000 us (approx 0.0 FPS)
+  Performance Gate : 50220 ms <= 2000 ms [FAIL]
+>>> [Stage 2] Pose Inference Test: [PERFORMANCE FAIL]
+
+nsh> [K

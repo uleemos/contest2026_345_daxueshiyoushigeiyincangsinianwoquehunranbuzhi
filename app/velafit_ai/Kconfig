@@ -53,6 +53,16 @@ config VELAFIT_POSE_MAX_INFER_MS
 		Acceptance threshold reported by the static real-image test.  Results
 		remain observable when exceeded, but the command returns failure.
 
+config VELAFIT_POSE_OPERATOR_PROFILE
+	bool "Collect per-operator MoveNet latency"
+	default n
+	depends on VELAFIT_POSE_BACKEND_TFLM
+	---help---
+		Attach a bounded aggregating profiler to the interpreter and print
+		operator type, call count, cumulative latency, average latency, and
+		percentage of Invoke time.  Enable for bottleneck analysis, then turn
+		it off for production latency measurements.
+
 config VELAFIT_POSE_FIXTURE_PATH
 	string "Build-host RGB192 real-person fixture path"
 	default "/tmp/velafit_pose_fixture_rgb192.bin"
