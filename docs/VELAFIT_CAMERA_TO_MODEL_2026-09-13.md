@@ -32,6 +32,12 @@ input, avoiding a 1280x720 RGB framebuffer.  A 16:9 camera frame occupies
   `187,188,189` with Q8 gains `918,543,1024`.
 - Empty-scene MoveNet invocation: PASS, all 17 finite/in-range keypoints were
   returned and correctly classified `valid=no` (`0/17` score >= 0.2).
+- Real-person MoveNet invocation: PASS, all 17 finite/in-range keypoints were
+  returned and the frame was classified `valid=yes` (`13/17` score >= 0.2,
+  `infer_us=50,210,000`).  Head, arms and hips were detected strongly.  The
+  captured preview showed only head through hips; knees and ankles were
+  physically outside the camera frame and consequently scored only
+  `0.03-0.07`.
 - Profiled inference latency: `50,320,000 us`; `CONV_2D` consumed 90.20% and
   `DEPTHWISE_CONV_2D` 7.83%.  This is a model-kernel performance failure
   relative to the separate 2 s / 200 ms targets, not a camera data-path
@@ -41,6 +47,7 @@ Evidence logs:
 
 - `hardware-logs/velafit-camera-input-awb-20260913.log`
 - `hardware-logs/velafit-camera-pose-empty-kpts-20260913.log`
+- `hardware-logs/velafit-camera-pose-person-20260913.log`
 - `hardware-logs/velafit-camera-input-awb-20260913.png`
 
 ## Manual acceptance still required
@@ -49,8 +56,9 @@ Evidence logs:
    clothes match the physical scene.  This determines whether rotation is
    required.
 2. Put a full standing person in frame with head and both feet visible, then
-   rerun `velafit_ai camera_pose` and require `valid=yes` with plausible 17
-   points.
+   rerun `velafit_ai camera_pose`.  The first real-person run achieved
+   `valid=yes`, but full-body acceptance still requires plausible knees and
+   ankles after the camera/person distance is increased.
 3. Visually confirm skin/clothes colors under the intended demonstration
    lighting.  The current lightweight AWB/gamma stage is suitable for model
    bring-up, but it is not a calibrated ESP32-P4 ISP tuning profile.
