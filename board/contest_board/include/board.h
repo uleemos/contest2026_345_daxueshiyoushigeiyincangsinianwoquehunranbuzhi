@@ -28,6 +28,7 @@ int board_c6_wifi_initialize(void);
 int board_c6_wifi_version(FAR uint32_t *major, FAR uint32_t *minor,
                           FAR uint32_t *patch);
 int board_c6_wifi_connect(FAR const char *ssid, FAR const char *password);
+FAR const char *board_c6_wifi_netdev_name(void);
 FAR struct sdio_dev_s *board_c6_wifi_sdio(void);
 #endif
 

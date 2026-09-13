@@ -11,6 +11,7 @@
 #include <nuttx/config.h>
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -18,7 +19,12 @@
 #include <syslog.h>
 
 #include <nuttx/arch.h>
+#include <nuttx/kthread.h>
+#include <nuttx/mutex.h>
+#include <nuttx/net/netdev_lowerhalf.h>
 #include <nuttx/sdio.h>
+#include <nuttx/signal.h>
+#include <nuttx/spinlock.h>
 
 #include <arch/chip/gpio_sig_map.h>
 #include <arch/chip/esp32p4_sdmmc.h>
@@ -58,17 +64,20 @@
 #define ESP_HOSTED_RX_BYTE_MASK   0xfffff
 #define ESP_HOSTED_TX_BUF_MASK    0xfff
 #define ESP_HOSTED_TX_BUF_MAX     0x1000
+#define ESP_HOSTED_TX_BUF_SIZE    1536
 #define ESP_HOSTED_NEW_PACKET     (1u << 23)
 #define ESP_HOSTED_OPEN_DATA_PATH 0
-#define ESP_HOSTED_RX_MAX         1536
+#define ESP_HOSTED_RX_MAX         8192
 #define ESP_HOSTED_RX_RETRIES     100
 
+#define ESP_HOSTED_STA_IF         1
 #define ESP_HOSTED_SERIAL_IF      3
 #define ESP_HOSTED_PRIV_IF        5
 #define ESP_HOSTED_PRIV_PKT_EVENT 0x33
 #define ESP_HOSTED_PRIV_EVT_INIT  0x22
 
 #define ESP_HOSTED_REQ_SET_MODE   260
+#define ESP_HOSTED_REQ_GET_MAC    257
 #define ESP_HOSTED_REQ_WIFI_INIT  278
 #define ESP_HOSTED_REQ_WIFI_START 280
 #define ESP_HOSTED_REQ_WIFI_CONN  282
@@ -81,6 +90,13 @@
 #define ESP_HOSTED_WIFI_MAGIC     0x1f2f3f4f
 #define ESP_HOSTED_SSID_MAX       32
 #define ESP_HOSTED_PASSWORD_MAX   64
+
+#define C6_NET_MTU                1500
+#define C6_NET_FRAME_MAX          (C6_NET_MTU + 14)
+#define C6_NET_RX_QUOTA           4
+#define C6_NET_RX_POLL_MS         10
+#define C6_NET_RX_PRIORITY        100
+#define C6_NET_RX_STACKSIZE       4096
 
 begin_packed_struct struct esp_hosted_header_s
 {
@@ -101,6 +117,18 @@ begin_packed_struct struct esp_hosted_priv_event_s
   uint8_t data[0];
 } end_packed_struct;
 
+struct board_c6_netdev_s
+{
+  struct netdev_lowerhalf_s lower;
+  netpkt_queue_t rxqueue;
+  spinlock_t lock;
+  pid_t rxpid;
+  bool registered;
+  bool ifup;
+  bool connected;
+  bool running;
+};
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -109,12 +137,23 @@ static FAR struct sdio_dev_s *g_c6_sdio;
 static uint8_t aligned_data(64) g_c6_regbuf[ESP_HOSTED_BLOCK_SIZE];
 static uint8_t aligned_data(64) g_c6_rxbuf[ESP_HOSTED_RX_MAX];
 static uint8_t aligned_data(64) g_c6_txbuf[ESP_HOSTED_RX_MAX];
+static uint8_t aligned_data(64) g_c6_net_txpayload[C6_NET_FRAME_MAX];
 static uint32_t g_c6_rx_byte_count;
 static size_t g_c6_rx_offset;
 static size_t g_c6_rx_pending;
 static uint32_t g_c6_tx_buf_count;
 static uint32_t g_c6_rpc_uid;
+static uint16_t g_c6_tx_sequence;
 static bool g_c6_ready;
+static mutex_t g_c6_transport_lock = NXMUTEX_INITIALIZER;
+static struct board_c6_netdev_s g_c6_net;
+
+/****************************************************************************
+ * Private Function Prototypes
+ ****************************************************************************/
+
+static int board_c6_net_enqueue(FAR const uint8_t *payload, size_t len);
+static void board_c6_net_set_connected(bool connected);
 
 /****************************************************************************
  * Private Functions
@@ -464,6 +503,7 @@ static int board_c6_hosted_send(FAR struct sdio_dev_s *dev,
   size_t payload_len;
   size_t frame_len;
   size_t nblocks;
+  size_t needed;
   size_t offset;
   unsigned int retries;
   int ret;
@@ -512,6 +552,8 @@ static int board_c6_hosted_send(FAR struct sdio_dev_s *dev,
   frame_len = offset;
   nblocks = (frame_len + ESP_HOSTED_BLOCK_SIZE - 1) /
             ESP_HOSTED_BLOCK_SIZE;
+  needed = (frame_len + ESP_HOSTED_TX_BUF_SIZE - 1) /
+           ESP_HOSTED_TX_BUF_SIZE;
   header->interface = ESP_HOSTED_SERIAL_IF;
   header->len = payload_len;
   header->offset = sizeof(*header);
@@ -527,8 +569,7 @@ static int board_c6_hosted_send(FAR struct sdio_dev_s *dev,
       available = (((token >> 16) & ESP_HOSTED_TX_BUF_MASK) +
                    ESP_HOSTED_TX_BUF_MAX - g_c6_tx_buf_count) &
                   ESP_HOSTED_TX_BUF_MASK;
-      if (available >= (frame_len + ESP_HOSTED_BLOCK_SIZE - 1) /
-                       ESP_HOSTED_BLOCK_SIZE)
+      if (available >= needed)
         {
           break;
         }
@@ -550,8 +591,80 @@ static int board_c6_hosted_send(FAR struct sdio_dev_s *dev,
       return ret;
     }
 
-  g_c6_tx_buf_count += nblocks;
+  g_c6_tx_buf_count += needed;
   g_c6_tx_buf_count &= ESP_HOSTED_TX_BUF_MASK;
+  return OK;
+}
+
+static int board_c6_hosted_send_data(FAR struct sdio_dev_s *dev,
+                                     FAR const uint8_t *payload,
+                                     size_t payload_len)
+{
+  FAR struct esp_hosted_header_s *header;
+  uint32_t token;
+  uint32_t available;
+  size_t frame_len;
+  size_t nblocks;
+  size_t needed;
+  unsigned int retries;
+  int ret;
+
+  if (payload == NULL || payload_len == 0 ||
+      payload_len > C6_NET_FRAME_MAX ||
+      payload_len > sizeof(g_c6_txbuf) - sizeof(*header))
+    {
+      return -EMSGSIZE;
+    }
+
+  frame_len = sizeof(*header) + payload_len;
+  nblocks = (frame_len + ESP_HOSTED_BLOCK_SIZE - 1) /
+            ESP_HOSTED_BLOCK_SIZE;
+  needed = (frame_len + ESP_HOSTED_TX_BUF_SIZE - 1) /
+           ESP_HOSTED_TX_BUF_SIZE;
+
+  memset(g_c6_txbuf, 0, sizeof(g_c6_txbuf));
+  header = (FAR struct esp_hosted_header_s *)g_c6_txbuf;
+  header->interface = ESP_HOSTED_STA_IF;
+  header->len = payload_len;
+  header->offset = sizeof(*header);
+  header->sequence = g_c6_tx_sequence++;
+  memcpy(g_c6_txbuf + sizeof(*header), payload, payload_len);
+
+  for (retries = 0; retries < 50; retries++)
+    {
+      ret = board_c6_cmd53_reg(dev, false, ESP_HOSTED_TOKEN_REG, &token);
+      if (ret < 0)
+        {
+          return ret;
+        }
+
+      available = (((token >> 16) & ESP_HOSTED_TX_BUF_MASK) +
+                   ESP_HOSTED_TX_BUF_MAX - g_c6_tx_buf_count) &
+                  ESP_HOSTED_TX_BUF_MASK;
+      if (available >= needed)
+        {
+          break;
+        }
+
+      up_mdelay(10);
+    }
+
+  if (retries == 50)
+    {
+      return -EBUSY;
+    }
+
+  ret = sdio_io_rw_extended(dev, true, ESP_HOSTED_SDIO_FUNCTION,
+                            ESP_HOSTED_FIFO_END - frame_len,
+                            true, g_c6_txbuf, ESP_HOSTED_BLOCK_SIZE,
+                            nblocks);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  g_c6_tx_buf_count = (g_c6_tx_buf_count + needed) &
+                      ESP_HOSTED_TX_BUF_MASK;
   return OK;
 }
 
@@ -614,6 +727,10 @@ static int board_c6_hosted_receive(FAR struct sdio_dev_s *dev,
           if (packet_len < sizeof(*header) ||
               packet_len > sizeof(g_c6_rxbuf))
             {
+              syslog(LOG_ERR,
+                     "ERROR: ESP32-C6 RX aggregate length=%lu max=%lu\n",
+                     (unsigned long)packet_len,
+                     (unsigned long)sizeof(g_c6_rxbuf));
               return -EMSGSIZE;
             }
 
@@ -642,6 +759,17 @@ static int board_c6_hosted_receive(FAR struct sdio_dev_s *dev,
 
       header = (FAR struct esp_hosted_header_s *)
                (g_c6_rxbuf + g_c6_rx_offset);
+      if (header->interface == 0 && header->len == 0 &&
+          header->offset == 0)
+        {
+          /* Older ESP-Hosted SDIO firmware may include zero padding in the
+           * cumulative receive count.  Padding is not another frame.
+           */
+
+          g_c6_rx_pending = 0;
+          continue;
+        }
+
       packet_len = header->offset + header->len;
       if (packet_len < sizeof(*header) || packet_len > g_c6_rx_pending)
         {
@@ -651,13 +779,24 @@ static int board_c6_hosted_receive(FAR struct sdio_dev_s *dev,
 
       g_c6_rx_offset += packet_len;
       g_c6_rx_pending -= packet_len;
-      if ((header->interface & 0x0f) != ESP_HOSTED_SERIAL_IF ||
-          header->offset < sizeof(*header))
+      if (header->offset < sizeof(*header))
+        {
+          g_c6_rx_pending = 0;
+          return -EPROTO;
+        }
+
+      payload = (FAR const uint8_t *)header + header->offset;
+      if ((header->interface & 0x0f) == ESP_HOSTED_STA_IF)
+        {
+          board_c6_net_enqueue(payload, header->len);
+          continue;
+        }
+
+      if ((header->interface & 0x0f) != ESP_HOSTED_SERIAL_IF)
         {
           continue;
         }
 
-      payload = (FAR const uint8_t *)header + header->offset;
       if (header->len < 15 || payload[0] != 1 || payload[1] != 6 ||
           payload[2] != 0 ||
           (memcmp(payload + 3, "RPCRsp", 6) != 0 &&
@@ -710,12 +849,18 @@ static int board_c6_rpc(FAR struct sdio_dev_s *dev, uint16_t request_id,
   unsigned int retries;
   int ret;
 
+  ret = nxmutex_lock(&g_c6_transport_lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
   wanted_uid = ++g_c6_rpc_uid;
   ret = board_c6_hosted_send(dev, request_id, wanted_uid,
                              request, request_len);
   if (ret < 0)
     {
-      return ret;
+      goto out;
     }
 
   for (retries = 0; retries < 8; retries++)
@@ -729,19 +874,24 @@ static int board_c6_rpc(FAR struct sdio_dev_s *dev, uint16_t request_id,
 
       if (ret < 0)
         {
-          return ret;
+          goto out;
         }
 
       if (msgid == request_id + 256 && uid == wanted_uid)
         {
-          return OK;
+          ret = OK;
+          goto out;
         }
 
       syslog(LOG_INFO, "ESP32-C6 RPC event: id=%u uid=%lu\n",
              msgid, (unsigned long)uid);
     }
 
-  return -ETIMEDOUT;
+  ret = -ETIMEDOUT;
+
+out:
+  nxmutex_unlock(&g_c6_transport_lock);
+  return ret;
 }
 
 static int board_c6_rpc_status(FAR struct sdio_dev_s *dev,
@@ -1066,10 +1216,317 @@ static int board_c6_hosted_handshake(FAR struct sdio_dev_s *dev)
   g_c6_rx_offset = 0;
   g_c6_rx_pending = 0;
   g_c6_tx_buf_count = 0;
+  g_c6_tx_sequence = 0;
   g_c6_rpc_uid = 0;
   syslog(LOG_INFO,
          "ESP32-C6 Hosted PASS: init event len=%u frame=%lu bytes\n",
          event->len, (unsigned long)packet_len);
+  return OK;
+}
+
+static int board_c6_wifi_get_mac(FAR struct sdio_dev_s *dev,
+                                 FAR uint8_t *mac)
+{
+  FAR const uint8_t *response;
+  FAR const uint8_t *value;
+  uint8_t request[8];
+  size_t request_len = 0;
+  size_t value_len;
+  uint64_t status;
+  int ret;
+
+  ret = board_c6_pb_put_field(request, sizeof(request), &request_len, 1,
+                              ESP_HOSTED_WIFI_IF_STA);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = board_c6_rpc(dev, ESP_HOSTED_REQ_GET_MAC, request, request_len,
+                     &response, &value_len);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = board_c6_pb_find(response, value_len, 2, &status, NULL, NULL);
+  if (ret != -ENOENT && (ret < 0 || (int32_t)status != 0))
+    {
+      return ret < 0 ? ret : -(int32_t)status;
+    }
+
+  ret = board_c6_pb_find(response, value_len, 1, NULL, &value, &value_len);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (value_len != 6)
+    {
+      return -EPROTO;
+    }
+
+  memcpy(mac, value, 6);
+  return OK;
+}
+
+static int board_c6_net_ifup(FAR struct netdev_lowerhalf_s *lower)
+{
+  FAR struct board_c6_netdev_s *priv =
+    container_of(lower, struct board_c6_netdev_s, lower);
+
+  priv->ifup = true;
+  if (priv->connected)
+    {
+      netdev_lower_carrier_on(lower);
+    }
+
+  return OK;
+}
+
+static int board_c6_net_ifdown(FAR struct netdev_lowerhalf_s *lower)
+{
+  FAR struct board_c6_netdev_s *priv =
+    container_of(lower, struct board_c6_netdev_s, lower);
+
+  priv->ifup = false;
+  netdev_lower_carrier_off(lower);
+  return OK;
+}
+
+static int board_c6_net_transmit(FAR struct netdev_lowerhalf_s *lower,
+                                 FAR netpkt_t *pkt)
+{
+  unsigned int len;
+  int ret;
+
+  if (!g_c6_net.connected || g_c6_sdio == NULL)
+    {
+      return -ENETDOWN;
+    }
+
+  len = netpkt_getdatalen(lower, pkt);
+  if (len == 0 || len > sizeof(g_c6_net_txpayload))
+    {
+      NETDEV_TXERRORS(&lower->netdev);
+      return -EMSGSIZE;
+    }
+
+  ret = netpkt_copyout(lower, g_c6_net_txpayload, pkt, len, 0);
+  if (ret < 0)
+    {
+      NETDEV_TXERRORS(&lower->netdev);
+      return ret;
+    }
+
+  ret = nxmutex_lock(&g_c6_transport_lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = board_c6_hosted_send_data(g_c6_sdio, g_c6_net_txpayload, len);
+  nxmutex_unlock(&g_c6_transport_lock);
+  if (ret < 0)
+    {
+      NETDEV_TXERRORS(&lower->netdev);
+      return ret;
+    }
+
+  NETDEV_TXPACKETS(&lower->netdev);
+  netpkt_free(lower, pkt, NETPKT_TX);
+  netdev_lower_txdone(lower);
+  return OK;
+}
+
+static FAR netpkt_t *
+board_c6_net_receive(FAR struct netdev_lowerhalf_s *lower)
+{
+  FAR struct board_c6_netdev_s *priv =
+    container_of(lower, struct board_c6_netdev_s, lower);
+  FAR netpkt_t *pkt;
+  irqstate_t flags;
+
+  flags = spin_lock_irqsave(&priv->lock);
+  pkt = netpkt_remove_queue(&priv->rxqueue);
+  spin_unlock_irqrestore(&priv->lock, flags);
+  return pkt;
+}
+
+static const struct netdev_ops_s g_c6_net_ops =
+{
+  board_c6_net_ifup,
+  board_c6_net_ifdown,
+  board_c6_net_transmit,
+  board_c6_net_receive
+};
+
+static int board_c6_net_enqueue(FAR const uint8_t *payload, size_t len)
+{
+  FAR struct netdev_lowerhalf_s *lower = &g_c6_net.lower;
+  FAR netpkt_t *pkt;
+  irqstate_t flags;
+  int ret;
+
+  if (!g_c6_net.registered || len < 14 || len > C6_NET_FRAME_MAX)
+    {
+      return -ENETDOWN;
+    }
+
+  pkt = netpkt_alloc(lower, NETPKT_RX);
+  if (pkt == NULL)
+    {
+      NETDEV_RXDROPPED(&lower->netdev);
+      return -ENOMEM;
+    }
+
+  ret = netpkt_copyin(lower, pkt, payload, len, 0);
+  if (ret < 0)
+    {
+      netpkt_free(lower, pkt, NETPKT_RX);
+      NETDEV_RXERRORS(&lower->netdev);
+      return ret;
+    }
+
+  flags = spin_lock_irqsave(&g_c6_net.lock);
+  ret = netpkt_tryadd_queue(pkt, &g_c6_net.rxqueue);
+  spin_unlock_irqrestore(&g_c6_net.lock, flags);
+  if (ret < 0)
+    {
+      netpkt_free(lower, pkt, NETPKT_RX);
+      NETDEV_RXDROPPED(&lower->netdev);
+      return ret;
+    }
+
+  NETDEV_RXPACKETS(&lower->netdev);
+  netdev_lower_rxready(lower);
+  return OK;
+}
+
+static void board_c6_net_set_connected(bool connected)
+{
+  g_c6_net.connected = connected;
+  if (!g_c6_net.registered || !g_c6_net.ifup)
+    {
+      return;
+    }
+
+  if (connected)
+    {
+      netdev_lower_carrier_on(&g_c6_net.lower);
+    }
+  else
+    {
+      netdev_lower_carrier_off(&g_c6_net.lower);
+    }
+}
+
+static int board_c6_net_rxthread(int argc, FAR char *argv[])
+{
+  FAR const uint8_t *payload;
+  size_t payload_len;
+  uint16_t msgid;
+  uint32_t uid;
+  unsigned int errors = 0;
+  int ret;
+
+  while (g_c6_net.running)
+    {
+      ret = nxmutex_lock(&g_c6_transport_lock);
+      if (ret < 0)
+        {
+          break;
+        }
+
+      ret = board_c6_hosted_receive(g_c6_sdio, &msgid, &uid,
+                                    &payload, &payload_len,
+                                    C6_NET_RX_POLL_MS);
+      nxmutex_unlock(&g_c6_transport_lock);
+
+      if (ret == OK)
+        {
+          errors = 0;
+          if (msgid == ESP_HOSTED_EVT_STA_CONN)
+            {
+              board_c6_net_set_connected(true);
+              syslog(LOG_INFO, "ESP32-C6 Wi-Fi carrier connected\n");
+            }
+          else if (msgid == ESP_HOSTED_EVT_STA_DISCON)
+            {
+              board_c6_net_set_connected(false);
+              syslog(LOG_ERR, "ERROR: ESP32-C6 Wi-Fi carrier lost\n");
+            }
+        }
+      else if (ret != -ETIMEDOUT)
+        {
+          errors++;
+          if (errors == 1 || errors % 100 == 0)
+            {
+              syslog(LOG_ERR,
+                     "ERROR: ESP32-C6 data receive failed: %d count=%u\n",
+                     ret, errors);
+            }
+        }
+
+      nxsig_usleep(C6_NET_RX_POLL_MS * 1000);
+    }
+
+  g_c6_net.rxpid = -1;
+  return OK;
+}
+
+static int board_c6_net_register(FAR const uint8_t *mac)
+{
+  FAR struct netdev_lowerhalf_s *lower = &g_c6_net.lower;
+  int ret;
+
+  if (g_c6_net.registered)
+    {
+      return OK;
+    }
+
+  memset(&g_c6_net, 0, sizeof(g_c6_net));
+  spin_lock_init(&g_c6_net.lock);
+  lower->ops = &g_c6_net_ops;
+  lower->quota[NETPKT_TX] = 1;
+  lower->quota[NETPKT_RX] = C6_NET_RX_QUOTA;
+  /* The ESP-Hosted transport already has its own RX polling thread.  Use a
+   * dedicated upper-half thread to drain the netpkt queue when that poller
+   * reports data.  NETDEV_RX_WORK expects lower->priority to contain a work
+   * queue ID (HPWORK/LPWORK), not a scheduler priority; passing our RX task
+   * priority there silently prevented the queued Ethernet frames from ever
+   * reaching eth_input().
+   */
+
+  lower->rxtype = NETDEV_RX_THREAD;
+  lower->priority = C6_NET_RX_PRIORITY;
+  lower->netdev.d_pktsize = C6_NET_FRAME_MAX;
+  memcpy(lower->netdev.d_mac.ether.ether_addr_octet, mac, 6);
+
+  ret = netdev_lower_register(lower, NET_LL_ETHERNET);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  g_c6_net.registered = true;
+  g_c6_net.running = true;
+  g_c6_net.rxpid = kthread_create("c6-rx", C6_NET_RX_PRIORITY,
+                                  C6_NET_RX_STACKSIZE,
+                                  board_c6_net_rxthread, NULL);
+  if (g_c6_net.rxpid < 0)
+    {
+      ret = g_c6_net.rxpid;
+      g_c6_net.running = false;
+      g_c6_net.registered = false;
+      netdev_lower_unregister(lower);
+      return ret;
+    }
+
+  syslog(LOG_INFO,
+         "ESP32-C6 netdev PASS: %s MAC=%02x:%02x:%02x:%02x:%02x:%02x\n",
+         lower->netdev.d_ifname,
+         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   return OK;
 }
 
@@ -1227,6 +1684,7 @@ int board_c6_wifi_version(FAR uint32_t *major, FAR uint32_t *minor,
 int board_c6_wifi_connect(FAR const char *ssid, FAR const char *password)
 {
   uint8_t request[8];
+  uint8_t mac[6];
   size_t request_len = 0;
   int ret;
 
@@ -1246,6 +1704,7 @@ int board_c6_wifi_connect(FAR const char *ssid, FAR const char *password)
   ret = board_c6_wifi_rpc_init(g_c6_sdio);
   if (ret < 0)
     {
+      syslog(LOG_ERR, "ERROR: ESP32-C6 RPC init failed: %d\n", ret);
       return ret;
     }
 
@@ -1260,31 +1719,63 @@ int board_c6_wifi_connect(FAR const char *ssid, FAR const char *password)
                             request, request_len);
   if (ret < 0)
     {
+      syslog(LOG_ERR, "ERROR: ESP32-C6 set STA mode failed: %d\n", ret);
+      return ret;
+    }
+
+  ret = board_c6_wifi_get_mac(g_c6_sdio, mac);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: ESP32-C6 get STA MAC failed: %d\n", ret);
       return ret;
     }
 
   ret = board_c6_wifi_rpc_set_config(g_c6_sdio, ssid, password);
   if (ret < 0)
     {
+      syslog(LOG_ERR, "ERROR: ESP32-C6 set STA config failed: %d\n", ret);
       return ret;
     }
 
   ret = board_c6_rpc_status(g_c6_sdio, ESP_HOSTED_REQ_WIFI_START, NULL, 0);
   if (ret < 0)
     {
+      syslog(LOG_ERR, "ERROR: ESP32-C6 Wi-Fi start failed: %d\n", ret);
       return ret;
     }
 
   ret = board_c6_rpc_status(g_c6_sdio, ESP_HOSTED_REQ_WIFI_CONN, NULL, 0);
   if (ret < 0)
     {
+      syslog(LOG_ERR, "ERROR: ESP32-C6 STA connect request failed: %d\n",
+             ret);
       return ret;
     }
 
-  return board_c6_wifi_wait_connected(g_c6_sdio);
+  ret = board_c6_wifi_wait_connected(g_c6_sdio);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: ESP32-C6 STA association failed: %d\n", ret);
+      return ret;
+    }
+
+  ret = board_c6_net_register(mac);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: ESP32-C6 netdev register failed: %d\n", ret);
+      return ret;
+    }
+
+  board_c6_net_set_connected(true);
+  return OK;
 }
 
 FAR struct sdio_dev_s *board_c6_wifi_sdio(void)
 {
   return g_c6_sdio;
+}
+
+FAR const char *board_c6_wifi_netdev_name(void)
+{
+  return g_c6_net.registered ? g_c6_net.lower.netdev.d_ifname : NULL;
 }
