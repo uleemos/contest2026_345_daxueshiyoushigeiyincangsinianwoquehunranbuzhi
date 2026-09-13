@@ -5,6 +5,7 @@ import argparse
 import pathlib
 import sys
 import time
+from typing import BinaryIO
 
 import serial
 from serial.serialutil import SerialException
@@ -57,7 +58,10 @@ def write_command(port: serial.Serial, payload: bytes) -> None:
 
 
 def read_until_prompt(
-    port: serial.Serial, timeout: float, command: bytes | None = None
+    port: serial.Serial,
+    timeout: float,
+    command: bytes | None = None,
+    log_file: BinaryIO | None = None,
 ) -> bytes:
     deadline = time.monotonic() + timeout
     data = bytearray()
@@ -72,6 +76,9 @@ def read_until_prompt(
             data.extend(chunk)
             sys.stdout.buffer.write(chunk)
             sys.stdout.buffer.flush()
+            if log_file is not None:
+                log_file.write(chunk)
+                log_file.flush()
             if command is None:
                 if b"nsh>" in data:
                     break
@@ -94,26 +101,29 @@ def main() -> int:
     parser.add_argument("--log", type=pathlib.Path, required=True)
     args = parser.parse_args()
 
+    args.log.parent.mkdir(parents=True, exist_ok=True)
     port = open_port(args.port, time.monotonic() + 20)
     transcript = bytearray()
-    try:
-        write_command(port, b"\r\n")
-        transcript.extend(read_until_prompt(port, 15))
-        time.sleep(0.25)
-        port.read(port.in_waiting or 1)
-        for command in args.commands:
-            marker = f"\n===== COMMAND: {command} =====\n".encode()
-            sys.stdout.buffer.write(marker)
-            sys.stdout.buffer.flush()
-            transcript.extend(marker)
-            encoded = command.encode("ascii")
-            write_command(port, encoded + b"\r\n")
-            transcript.extend(read_until_prompt(port, args.timeout, encoded))
-    finally:
-        port.close()
-
-    args.log.parent.mkdir(parents=True, exist_ok=True)
-    args.log.write_bytes(transcript)
+    with args.log.open("wb") as log_file:
+        try:
+            write_command(port, b"\r\n")
+            transcript.extend(read_until_prompt(port, 15, log_file=log_file))
+            time.sleep(0.25)
+            port.read(port.in_waiting or 1)
+            for command in args.commands:
+                marker = f"\n===== COMMAND: {command} =====\n".encode()
+                sys.stdout.buffer.write(marker)
+                sys.stdout.buffer.flush()
+                log_file.write(marker)
+                log_file.flush()
+                transcript.extend(marker)
+                encoded = command.encode("ascii")
+                write_command(port, encoded + b"\r\n")
+                transcript.extend(
+                    read_until_prompt(port, args.timeout, encoded, log_file)
+                )
+        finally:
+            port.close()
 
     missing = [item for item in args.expect if item.encode() not in transcript]
     for item in missing:
