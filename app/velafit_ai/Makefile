@@ -19,6 +19,7 @@ CFLAGS += -I$(APPDIR)/packages/demos/contest2026_345_velafit_ai/storage
 CFLAGS += -I$(APPDIR)/packages/demos/contest2026_345_velafit_ai/sync
 CFLAGS += -I$(APPDIR)/packages/demos/contest2026_345_velafit_ai/pipeline
 CFLAGS += -I$(APPDIR)/packages/demos/contest2026_345_velafit_ai/plan
+CFLAGS += -I$(APPDIR)/packages/demos/contest2026_345_sc2336_probe
 CFLAGS += -I$(TOPDIR)/arch/risc-v/src/esp32p4
 
 ifneq ($(CONFIG_VELAFIT_POSE_BACKEND_TFLM),)

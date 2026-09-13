@@ -29,6 +29,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <sys/stat.h>
 
 #include "velafit_types.h"
@@ -54,6 +55,9 @@
 #include "velafit_config.h"
 #include "velafit_ppa_bench.h"
 #include "velafit_touch.h"
+#ifdef CONFIG_VELAFIT_CAMERA_SC2336
+#include "sc2336_capture.h"
+#endif
 
 /****************************************************************************
  * Private Functions
@@ -73,6 +77,10 @@ static void print_usage(void)
   printf("  benchmark            - Stage 1: ESP-NN SIMD Benchmarks\n");
   printf("  ppa                  - Stage 1: PPA 2D Hardware Benchmarks\n");
   printf("  test_pose            - Stage 2: 17 Keypoint Pose Inference\n");
+#ifdef CONFIG_VELAFIT_CAMERA_SC2336
+  printf("  camera_input [dump]  - RAW10 -> 192x192 RGB capture/export\n");
+  printf("  camera_pose          - Camera RGB -> MoveNet -> 17 keypoints\n");
+#endif
   printf("  test_squat  [count]  - Stage 3: Squat FSM & Quality Audit\n");
   printf("  test_jj     [count]  - Stage 3: Jumping Jack FSM Simulation\n");
   printf("  test_pushup [count]  - Stage 3: Push-up FSM & Quality Audit\n");
@@ -184,6 +192,185 @@ static int cmd_test_pose(void)
                         "PERFORMANCE FAIL");
   return latency_pass ? 0 : -ETIME;
 }
+
+#ifdef CONFIG_VELAFIT_CAMERA_SC2336
+static int write_camera_ppm(const char *path, const uint8_t *rgb)
+{
+  FILE *fp = fopen(path, "wb");
+  size_t image_size = VELAFIT_MODEL_INPUT_WIDTH *
+                      VELAFIT_MODEL_INPUT_HEIGHT * 3;
+
+  if (fp == NULL)
+    {
+      return -errno;
+    }
+
+  if (fprintf(fp, "P6\n%d %d\n255\n", VELAFIT_MODEL_INPUT_WIDTH,
+              VELAFIT_MODEL_INPUT_HEIGHT) < 0 ||
+      fwrite(rgb, 1, image_size, fp) != image_size)
+    {
+      int err = errno == 0 ? EIO : errno;
+      fclose(fp);
+      return -err;
+    }
+
+  if (fclose(fp) != 0)
+    {
+      return -errno;
+    }
+
+  return 0;
+}
+
+static int dump_file_base64(const char *path)
+{
+  static const char alphabet[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  uint8_t in[3];
+  unsigned int column = 0;
+  FILE *fp = fopen(path, "rb");
+
+  if (fp == NULL)
+    {
+      return -errno;
+    }
+
+  printf("VELAFIT_CAMERA_PPM_BASE64_BEGIN\n");
+  while (1)
+    {
+      size_t n = fread(in, 1, sizeof(in), fp);
+      if (n == 0)
+        {
+          break;
+        }
+
+      char out[4];
+      out[0] = alphabet[in[0] >> 2];
+      out[1] = alphabet[((in[0] & 3) << 4) | (n > 1 ? in[1] >> 4 : 0)];
+      out[2] = n > 1 ? alphabet[((in[1] & 15) << 2) |
+                                (n > 2 ? in[2] >> 6 : 0)] : '=';
+      out[3] = n > 2 ? alphabet[in[2] & 63] : '=';
+      fwrite(out, 1, sizeof(out), stdout);
+      column += 4;
+      if (column == 76)
+        {
+          putchar('\n');
+          column = 0;
+        }
+
+      if (n < sizeof(in))
+        {
+          break;
+        }
+    }
+
+  if (column != 0)
+    {
+      putchar('\n');
+    }
+
+  fclose(fp);
+  printf("VELAFIT_CAMERA_PPM_BASE64_END\n");
+  fflush(stdout);
+  return 0;
+}
+
+static int cmd_camera(bool infer, bool dump)
+{
+  static const char ppm_path[] = "/tmp/velafit-camera.ppm";
+  const size_t image_size = VELAFIT_MODEL_INPUT_WIDTH *
+                            VELAFIT_MODEL_INPUT_HEIGHT * 3;
+  struct sc2336_rgb_capture_s capture;
+  uint8_t *rgb = malloc(image_size);
+  int ret;
+
+  if (rgb == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  printf("[VELAFIT-CAMERA] capture=SC2336 mode=1280x720 format=RAW10 "
+         "bayer=BGGR\n");
+  ret = sc2336_capture_rgb888_letterbox(rgb, image_size,
+                                        VELAFIT_MODEL_INPUT_WIDTH,
+                                        VELAFIT_MODEL_INPUT_HEIGHT,
+                                        &capture);
+  if (ret < 0)
+    {
+      printf("[VELAFIT-CAMERA] capture FAIL ret=%d\n", ret);
+      free(rgb);
+      return ret;
+    }
+
+  printf("[VELAFIT-CAMERA] capture PASS raw_crc32=%08" PRIx32
+         " capture_us=%" PRIu64 " guard=PASS\n",
+         capture.raw_crc32, capture.capture_us);
+  printf("[VELAFIT-CAMERA] convert PASS rgb_crc32=%08" PRIx32
+         " convert_us=%" PRIu64 " content=%ux%u+%u+%u"
+         " linear_mean_rgb=%u,%u,%u mean_rgb=%u,%u,%u"
+         " wb_q8=%u,%u,%u\n",
+         capture.rgb_crc32, capture.convert_us,
+         capture.content_w, capture.content_h,
+         capture.content_x, capture.content_y,
+         capture.linear_mean_r, capture.linear_mean_g,
+         capture.linear_mean_b,
+         capture.mean_r, capture.mean_g, capture.mean_b,
+         capture.wb_gain_r_q8, capture.wb_gain_g_q8,
+         capture.wb_gain_b_q8);
+
+  ret = write_camera_ppm(ppm_path, rgb);
+  if (ret < 0)
+    {
+      printf("[VELAFIT-CAMERA] PPM write FAIL ret=%d\n", ret);
+      free(rgb);
+      return ret;
+    }
+
+  printf("[VELAFIT-CAMERA] PPM PASS path=%s bytes=%zu\n",
+         ppm_path, image_size + 15);
+  if (dump)
+    {
+      ret = dump_file_base64(ppm_path);
+      if (ret < 0)
+        {
+          free(rgb);
+          return ret;
+        }
+    }
+
+  if (infer)
+    {
+      pose_frame_t pose;
+      velafit_perf_t perf;
+      ret = velafit_pose_infer(rgb, &pose, &perf);
+      if (ret == 0 || ret == -ENODATA)
+        {
+          printf("[VELAFIT-CAMERA] MoveNet PASS valid=%s infer_us=%" PRIu32
+                 " keypoints=%d\n", pose.valid ? "yes" : "no",
+                 perf.infer_us, VELAFIT_NUM_KEYPOINTS);
+          for (int i = 0; i < VELAFIT_NUM_KEYPOINTS; i++)
+            {
+              printf("[VELAFIT-CAMERA] kpt=%02d x=%.3f y=%.3f score=%.2f\n",
+                     i, pose.kpts[i].x, pose.kpts[i].y,
+                     pose.kpts[i].score);
+            }
+
+          /* No confident person is a valid model result for an empty frame,
+           * not a camera-to-model transport failure.
+           */
+
+          ret = 0;
+        }
+      else
+        {
+          printf("[VELAFIT-CAMERA] MoveNet FAIL ret=%d\n", ret);
+        }
+    }
+
+  free(rgb);
+  return ret;
+}
+#endif
 
 /****************************************************************************
  * Name: cmd_test_squat
@@ -1091,6 +1278,16 @@ int main(int argc, char *argv[])
     {
       ret = cmd_test_pose();
     }
+#ifdef CONFIG_VELAFIT_CAMERA_SC2336
+  else if (strcmp(cmd, "camera_input") == 0)
+    {
+      ret = cmd_camera(false, argc >= 3 && strcmp(argv[2], "dump") == 0);
+    }
+  else if (strcmp(cmd, "camera_pose") == 0)
+    {
+      ret = cmd_camera(true, false);
+    }
+#endif
   else if (strcmp(cmd, "test_squat") == 0)
     {
       int count = (argc >= 3) ? atoi(argv[2]) : 1;

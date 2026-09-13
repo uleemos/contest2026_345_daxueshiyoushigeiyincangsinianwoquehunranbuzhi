@@ -1,0 +1,66 @@
+
+nsh> 
+===== COMMAND: velafit_ai camera_pose =====
+velafit_ai camera_pose
+[VELAFIT-CAMERA] capture=SC2336 mode=1280x720 format=RAW10 bayer=BGGR
+Initializing ESP32-P4 MIPI CSI controller (720p: 1280x720, 2 lanes, 480 Mbps)...
+SC2336 soft-reset: writing reg 0x0103 = 0x01...
+SC2336 soft-reset PASS, chip_id=0xcb3a restored
+SC2336 init mode: 720p...
+SC2336 init table written successfully (165 registers)
+SC2336 readback verification (720p):
+  CLK_CTRL (0x3106)   = 0x05 (expected 0x05)
+  ANA_INIT_1 (0x36e9) = 0x53 (expected 0x53)
+  ANA_INIT_2 (0x37f9) = 0x53 (expected 0x53)
+  VTS      (0x320e/f) = 1500
+SC2336 register verification PASS
+SC2336 stream control: setting 0x0100 = 0x01 (STREAM_ON)...
+SC2336 STREAM_ON PASS (target=0x01, I2C ACK OK)
+SC2336 stream control: setting 0x0100 = 0x00 (STREAM_OFF)...
+SC2336 STREAM_OFF PASS (target=0x00, I2C ACK OK)
+[VELAFIT-CAMERA] capture PASS raw_crc32=26855458 capture_us=100000 guard=PASS
+[VELAFIT-CAMERA] convert PASS rgb_crc32=df249dda convert_us=40000 content=192x108+0+42 linear_mean_rgb=55,82,51 mean_rgb=187,188,189 wb_q8=918,543,1024
+[VELAFIT-CAMERA] PPM PASS path=/tmp/velafit-camera.ppm bytes=110607
+[VELAFIT-TFLM] init PASS model=2894840 arena=3145728
+[VELAFIT-POSE] Backend: TFLM MoveNet (real inference)
+[VELAFIT-PROFILE] operator,count,total_us,avg_us,invoke_pct
+[VELAFIT-PROFILE] CAST,5,20000,4000,0.04
+[VELAFIT-PROFILE] QUANTIZE,8,140000,17500,0.28
+[VELAFIT-PROFILE] SUB,6,200000,33333,0.40
+[VELAFIT-PROFILE] MUL,7,60000,8571,0.12
+[VELAFIT-PROFILE] CONV_2D,50,45390000,907800,90.20
+[VELAFIT-PROFILE] DEPTHWISE_CONV_2D,24,3940000,164166,7.83
+[VELAFIT-PROFILE] ADD,19,220000,11578,0.44
+[VELAFIT-PROFILE] RESIZE_BILINEAR,3,40000,13333,0.07
+[VELAFIT-PROFILE] LOGISTIC,2,140000,70000,0.28
+[VELAFIT-PROFILE] RESHAPE,12,0,0,0.00
+[VELAFIT-PROFILE] ARG_MAX,2,0,0,0.00
+[VELAFIT-PROFILE] FLOOR_DIV,2,0,0,0.00
+[VELAFIT-PROFILE] PACK,3,0,0,0.00
+[VELAFIT-PROFILE] DEQUANTIZE,4,90000,22500,0.18
+[VELAFIT-PROFILE] GATHER_ND,4,0,0,0.00
+[VELAFIT-PROFILE] UNPACK,2,0,0,0.00
+[VELAFIT-PROFILE] SQRT,1,60000,60000,0.12
+[VELAFIT-PROFILE] DIV,1,20000,20000,0.04
+[VELAFIT-PROFILE] CONCATENATION,2,0,0,0.00
+[VELAFIT-PROFILE] tags=19 overflow=0
+[VELAFIT-TFLM] output PASS confident=0/17 valid=no
+[VELAFIT-CAMERA] MoveNet PASS valid=no infer_us=50320000 keypoints=17
+[VELAFIT-CAMERA] kpt=00 x=0.615 y=0.365 score=0.04
+[VELAFIT-CAMERA] kpt=01 x=0.623 y=0.352 score=0.05
+[VELAFIT-CAMERA] kpt=02 x=0.610 y=0.320 score=0.07
+[VELAFIT-CAMERA] kpt=03 x=0.688 y=0.283 score=0.05
+[VELAFIT-CAMERA] kpt=04 x=0.549 y=0.311 score=0.05
+[VELAFIT-CAMERA] kpt=05 x=0.709 y=0.348 score=0.04
+[VELAFIT-CAMERA] kpt=06 x=0.524 y=0.401 score=0.09
+[VELAFIT-CAMERA] kpt=07 x=0.709 y=0.377 score=0.02
+[VELAFIT-CAMERA] kpt=08 x=0.434 y=0.574 score=0.05
+[VELAFIT-CAMERA] kpt=09 x=0.635 y=0.496 score=0.02
+[VELAFIT-CAMERA] kpt=10 x=0.426 y=0.619 score=0.07
+[VELAFIT-CAMERA] kpt=11 x=0.598 y=0.508 score=0.05
+[VELAFIT-CAMERA] kpt=12 x=0.483 y=0.463 score=0.07
+[VELAFIT-CAMERA] kpt=13 x=0.553 y=0.680 score=0.09
+[VELAFIT-CAMERA] kpt=14 x=0.504 y=0.672 score=0.07
+[VELAFIT-CAMERA] kpt=15 x=0.520 y=0.873 score=0.07
+[VELAFIT-CAMERA] kpt=16 x=0.504 y=0.881 score=0.05
+nsh> 

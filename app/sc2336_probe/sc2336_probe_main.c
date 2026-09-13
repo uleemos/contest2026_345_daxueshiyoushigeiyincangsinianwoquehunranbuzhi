@@ -39,6 +39,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <nuttx/i2c/i2c_master.h>
@@ -48,6 +49,7 @@
 #endif
 
 #include "sc2336_tables.h"
+#include "sc2336_capture.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -786,6 +788,150 @@ out:
       esp32p4_mipi_csi_deinit();
     }
 
+  return ret;
+}
+
+/****************************************************************************
+ * Name: sc2336_capture_rgb888_letterbox
+ *
+ * Description:
+ *   Capture one guarded 720p packed RAW10 frame and convert it directly to
+ *   an aspect-preserving RGB888 model input.  This public entry point lets
+ *   the VelaFit application use the already validated sensor/CSI sequence.
+ ****************************************************************************/
+
+int sc2336_capture_rgb888_letterbox(uint8_t *rgb, size_t rgb_len,
+                                    uint16_t rgb_w, uint16_t rgb_h,
+                                    struct sc2336_rgb_capture_s *result)
+{
+  struct esp32p4_csi_capture_config_s dma_cfg;
+  struct esp32p4_csi_frame_s frame;
+  const struct sc2336_reg_s *table;
+  struct timespec ts0;
+  struct timespec ts1;
+  bool csi_ready = false;
+  bool dma_ready = false;
+  bool streaming = false;
+  int fd = -1;
+  int ret;
+
+  if (rgb == NULL || result == NULL)
+    {
+      return -EINVAL;
+    }
+
+  memset(result, 0, sizeof(*result));
+  fd = open(SC2336_DEVICE_PATH, O_RDWR);
+  if (fd < 0)
+    {
+      return -errno;
+    }
+
+  ret = sc2336_csi_init_mode("720p");
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  csi_ready = true;
+  ret = sc2336_software_reset(fd);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  table = sc2336_get_mode_table("720p");
+  ret = sc2336_init_table(fd, table, "720p");
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  ret = sc2336_verify_key_registers(fd, "720p");
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  memset(&dma_cfg, 0, sizeof(dma_cfg));
+  dma_cfg.frame_width = 1280;
+  dma_cfg.frame_height = 720;
+  dma_cfg.bpp = 10;
+  dma_cfg.dma_chan = 0;
+  dma_cfg.buf_count = 2;
+  dma_cfg.mem_type = ESP32P4_CSI_BUF_PSRAM;
+  dma_cfg.enable_guard = true;
+
+  ret = esp32p4_csi_dma_init(&dma_cfg);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  dma_ready = true;
+  ret = esp32p4_csi_dma_start();
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  clock_gettime(CLOCK_MONOTONIC, &ts0);
+  ret = sc2336_set_stream(fd, true);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  streaming = true;
+  memset(&frame, 0, sizeof(frame));
+  ret = esp32p4_csi_capture_frame(&frame, 1000);
+  clock_gettime(CLOCK_MONOTONIC, &ts1);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  result->capture_us = (uint64_t)
+    ((int64_t)(ts1.tv_sec - ts0.tv_sec) * 1000000ll +
+     (int64_t)(ts1.tv_nsec - ts0.tv_nsec) / 1000ll);
+  result->raw_crc32 = frame.crc32;
+  if (frame.bytes_received != frame.buflen || !frame.guard_valid)
+    {
+      ret = -EIO;
+      goto out;
+    }
+
+  clock_gettime(CLOCK_MONOTONIC, &ts0);
+  ret = sc2336_raw10_bggr_letterbox(frame.buffer, frame.bytes_received,
+                                    1280, 720, rgb, rgb_len,
+                                    rgb_w, rgb_h, result);
+  clock_gettime(CLOCK_MONOTONIC, &ts1);
+  result->convert_us = (uint64_t)
+    ((int64_t)(ts1.tv_sec - ts0.tv_sec) * 1000000ll +
+     (int64_t)(ts1.tv_nsec - ts0.tv_nsec) / 1000ll);
+
+out:
+  if (streaming)
+    {
+      int stop_ret = sc2336_set_stream(fd, false);
+      if (ret == 0 && stop_ret < 0)
+        {
+          ret = stop_ret;
+        }
+    }
+
+  if (dma_ready)
+    {
+      esp32p4_csi_dma_stop();
+      esp32p4_csi_dma_deinit();
+    }
+
+  if (csi_ready)
+    {
+      esp32p4_mipi_csi_deinit();
+    }
+
+  close(fd);
   return ret;
 }
 #endif
