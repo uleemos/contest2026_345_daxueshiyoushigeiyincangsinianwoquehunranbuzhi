@@ -10,3 +10,6 @@ Make.dep
 *.hex
 *.elf
 *.map
+
+# Local credentials (never commit)
+.secrets/
