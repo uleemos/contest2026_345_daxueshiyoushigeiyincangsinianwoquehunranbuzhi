@@ -10,5 +10,6 @@ STACKSIZE = 4096
 MODULE    = $(CONFIG_LVX_USE_DEMO_CONTEST2026_345_SC2336_PROBE)
 
 MAINSRC = sc2336_probe_main.c
+CSRCS  += sc2336_raw10.c
 
 include $(APPDIR)/Application.mk
