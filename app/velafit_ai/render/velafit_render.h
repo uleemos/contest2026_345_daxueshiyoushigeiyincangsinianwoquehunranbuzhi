@@ -175,6 +175,18 @@ void velafit_draw_string(velafit_canvas_t *canvas,
                          velafit_color_t bg,
                          int scale);
 
+/* Product mounting policy: strings are rasterized CCW90 in framebuffer
+ * coordinates. This does not rotate camera preview or pose coordinates. */
+
+/* SC2336 CCW90 + 192-square letterbox output -> center-cover preview.
+ * Only display coordinates change. Never feed these cropped coordinates to
+ * angle computation. Canvas dimensions are native framebuffer dimensions.
+ */
+void velafit_render_sc2336_skeleton(velafit_canvas_t *canvas,
+                                   const pose_frame_t *model_pose,
+                                   uint16_t raw_w, uint16_t raw_h,
+                                   uint32_t quality_flags);
+
 void velafit_render_skeleton(velafit_canvas_t *canvas,
                              const pose_frame_t *pose,
                              uint32_t quality_flags);
@@ -213,6 +225,10 @@ void velafit_render_dashboard(velafit_canvas_t *canvas,
 
 int velafit_render_save_ppm(const velafit_canvas_t *canvas,
                             const char *filename);
+
+void velafit_render_session_status(velafit_canvas_t *canvas,
+                                   const char *state, uint32_t seconds,
+                                   bool awake, bool online);
 
 int velafit_render_to_fb0(const velafit_canvas_t *canvas);
 

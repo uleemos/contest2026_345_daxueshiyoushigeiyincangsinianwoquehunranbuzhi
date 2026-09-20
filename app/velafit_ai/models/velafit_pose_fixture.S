@@ -5,13 +5,16 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+#ifndef VELAFIT_FIXTURE_BUILD_PATH
+#define VELAFIT_FIXTURE_BUILD_PATH CONFIG_VELAFIT_POSE_FIXTURE_PATH
+#endif
 
   .section .rodata.velafit_pose_fixture,"a",@progbits
   .balign 16
   .global g_velafit_pose_fixture_rgb192
   .type g_velafit_pose_fixture_rgb192, @object
 g_velafit_pose_fixture_rgb192:
-  .incbin CONFIG_VELAFIT_POSE_FIXTURE_PATH
+  .incbin VELAFIT_FIXTURE_BUILD_PATH
 .Lvelafit_pose_fixture_end:
   .size g_velafit_pose_fixture_rgb192, \
         .Lvelafit_pose_fixture_end - g_velafit_pose_fixture_rgb192

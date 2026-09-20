@@ -26,8 +26,15 @@ def open_port(name: str, timeout: float) -> serial.Serial:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            return serial.Serial(name, 115200, timeout=0.1, write_timeout=2,
-                                 dsrdtr=False, rtscts=False)
+            port = serial.Serial()
+            port.port = name
+            port.baudrate = 115200
+            port.timeout = 0.1
+            port.write_timeout = 2
+            port.dtr = False
+            port.rts = False
+            port.open()
+            return port
         except (OSError, SerialException):
             time.sleep(0.2)
     raise SerialException(f"{name} did not become available")
@@ -58,6 +65,11 @@ def read_until(port: serial.Serial, token: bytes, timeout: float,
                 return clean
         else:
             time.sleep(0.02)
+    clean = bytes(data)
+    for secret in secrets:
+        if secret:
+            clean = clean.replace(secret, b"<redacted>")
+    emit(clean, log_file)
     raise TimeoutError(f"timed out waiting for {token!r}")
 
 
@@ -79,9 +91,28 @@ def command(port: serial.Serial, value: str, timeout: float, log_file,
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", default="COM3")
+    parser.add_argument("--workout", action="store_true",
+                        help="Validate fixed structured workout via real cloud agent")
+    parser.add_argument("--sd-readonly", action="store_true",
+                        help="Read/mount SD with C6 active, then repeat after MiMo; no writes")
+    parser.add_argument("--queue-workout", action="store_true",
+                        help="New exclusive SD test directory: persisted injected failure then real sender")
     parser.add_argument("--env", type=pathlib.Path, required=True)
     parser.add_argument("--log", type=pathlib.Path, required=True)
+    parser.add_argument("--asr-fixture", action="store_true",
+                        help="Upload synthetic speech from P4, never record microphone")
+    parser.add_argument("--tts", action="store_true",
+                        help="Stream real mimo-v2.5-tts PCM16 to the speaker")
+    parser.add_argument("--coach", action="store_true",
+                        help="Fixed summary to real advice, LCD and TTS")
+    parser.add_argument("--demo-config", action="store_true",
+                        help="Store Wi-Fi/API credentials in RAM without starting C6")
     args = parser.parse_args()
+    if sum((args.workout, args.asr_fixture, args.tts, args.coach,
+            args.demo_config)) > 1:
+        parser.error('fixture flags and --demo-config are mutually exclusive')
+    if args.queue_workout and (args.workout or args.asr_fixture or args.tts or args.coach or args.sd_readonly):
+        parser.error('--queue-workout requires fresh boot and is exclusive of other fixture flags')
 
     env = load_env(args.env)
     ssid = env.get("VELAFIT_WIFI_SSID", "")
@@ -98,6 +129,7 @@ def main() -> int:
     secrets = (password.encode("utf-8"), api_key.encode("utf-8"))
     args.log.parent.mkdir(parents=True, exist_ok=True)
     transcript = bytearray()
+    sd_pass = True
     port = open_port(args.port, 20)
     port.dtr = False
     port.rts = False
@@ -107,10 +139,33 @@ def main() -> int:
             emit((f"C6 MiMo device acceptance started={started} "
                   f"port={args.port} endpoint="
                   "https://api.xiaomimimo.com/v1/chat/completions "
-                  "model=mimo-v2.5\n").encode(), log_file)
+                  f"model={'mimo-v2.5-asr' if args.asr_fixture else 'mimo-v2.5-tts+mimo-v2.5' if args.coach else 'mimo-v2.5-tts' if args.tts else 'mimo-v2.5'}\n").encode(), log_file)
             send(port, "")
             transcript.extend(read_until(port, b"nsh>", 15, log_file,
                                          secrets))
+
+            if args.demo_config:
+                emit(b"\n===== COMMAND: c6_wifi demo-config =====\n",
+                     log_file)
+                send(port, "c6_wifi demo-config")
+                transcript.extend(read_until(port, b"Wi-Fi SSID:", 10,
+                                             log_file, secrets))
+                send(port, ssid)
+                transcript.extend(read_until(
+                    port, b"Wi-Fi password (hidden):", 10, log_file,
+                    secrets))
+                send(port, password)
+                transcript.extend(read_until(port, b"MiMo API key (hidden):",
+                                             10, log_file, secrets))
+                send(port, api_key)
+                configured = read_until(port, b"nsh>", 15, log_file,
+                                        secrets)
+                transcript.extend(configured)
+                passed = (b"[VELAFIT] DEMO_CONFIG PASS network_started=no"
+                          in configured)
+                print(f"CHECK deferred demo config: "
+                      f"{'PASS' if passed else 'FAIL'}")
+                return 0 if passed else 2
 
             emit(b"\n===== COMMAND: c6_wifi connect (interactive) =====\n",
                  log_file)
@@ -132,29 +187,70 @@ def main() -> int:
             transcript.extend(command(port, "ifconfig eth0 dhcp", 30,
                                       log_file, secrets))
 
-            # First prove that VERIFY_REQUIRED rejects a deliberately wrong
-            # name while the TCP connection still targets the fixed MiMo host.
+            if args.sd_readonly:
+                result = command(port, "c6_wifi sd-file-readback", 90,
+                                 log_file, secrets)
+                transcript.extend(result)
+                sd_pass = b"SDTEST: reboot readback PASS ret=0 bytes=16384" in result
+                if not sd_pass:
+                    print("CHECK shared SD initial read: FAIL", file=sys.stderr)
+                    return 2
+
+            # Real SNI and VERIFY_REQUIRED authenticate the live connection.
+            # Then explicitly verify its chain against a wrong expected name,
+            # before application data.  Server SNI rejection is not evidence
+            # of local hostname verification.
             negative = command(port, "c6_wifi tls invalid.example", 60,
                                log_file, secrets)
             transcript.extend(negative)
-            negative_pass = (b"TLS handshake FAIL:" in negative and
+            negative_pass = (b"TLS hostname check FAIL:" in negative and
+                             b"phase=post-handshake" in negative and
+                             b"hostname_mismatch=yes" in negative and
                              b"TLS verify PASS:" not in negative)
 
             positive = command(port, "c6_wifi tls", 60, log_file, secrets)
             transcript.extend(positive)
             positive_pass = b"TLS verify PASS: host=api.xiaomimimo.com" in positive
 
-            emit(b"\n===== COMMAND: c6_wifi mimo (interactive key) =====\n",
-                 log_file)
-            send(port, "c6_wifi mimo")
+            request_command = ("c6_wifi queue-workout" if args.queue_workout else
+                               "c6_wifi workout" if args.workout else
+                               "c6_wifi asr-fixture" if args.asr_fixture else
+                               "c6_wifi coach-test" if args.coach else
+                               "c6_wifi tts" if args.tts else "c6_wifi mimo")
+            emit(f"\nCOMMAND: {request_command} (interactive key)\n".encode(), log_file)
+            send(port, request_command)
             transcript.extend(read_until(port, b"MiMo API key (hidden):",
                                          30, log_file, secrets))
             send(port, api_key)
             mimo = read_until(port, b"nsh>", 180, log_file, secrets)
             transcript.extend(mimo)
-            mimo_pass = (b"MiMo device PASS: status=200" in mimo and
-                         b"MiMo response:" in mimo and
-                         b"TLS verify PASS: host=api.xiaomimimo.com" in mimo)
+            if args.coach:
+                mimo_pass = (b"[VELAFIT] AI_ANALYSIS -> AI_RESULT http=200" in mimo and
+                             b"MiMo TTS STREAM_DONE status=200" in mimo and
+                             b"[VELAFIT] PLAYBACK_DONE -> IDLE" in mimo and
+                             b"[COACH-TEST] PASS advice_http=200" in mimo)
+            elif args.tts:
+                mimo_pass = (b"MiMo TTS HTTP status=200" in mimo and
+                             b"MiMo TTS STREAM_DONE status=200" in mimo and
+                             b"[TTS-TEST] PLAYBACK_DONE" in mimo and
+                             b"TLS verify PASS: host=api.xiaomimimo.com" in mimo)
+            else:
+                mimo_pass = (b"MiMo device PASS: status=200" in mimo and
+                             b"MiMo response:" in mimo and
+                             b"TLS verify PASS: host=api.xiaomimimo.com" in mimo)
+            if args.asr_fixture:
+                mimo_pass = mimo_pass and "运动教练".encode() in mimo
+            if args.workout:
+                mimo_pass = mimo_pass and b"Workout schema PASS session=VF-FIXED-001" in mimo
+            if args.queue_workout:
+                mimo_pass = (mimo_pass and
+                    b"Workout queue schema PASS session=VF-SD-CLOUD-20260915" in mimo and
+                    b"SDCLOUD persisted retry PASS ret=0 injected_offline=1 real_sender_calls=1" in mimo)
+            if args.sd_readonly:
+                result = command(port, "c6_wifi sd-file-readback", 90,
+                                 log_file, secrets)
+                transcript.extend(result)
+                sd_pass = sd_pass and b"SDTEST: reboot readback PASS ret=0 bytes=16384" in result
     finally:
         port.close()
         password = ""
@@ -164,8 +260,12 @@ def main() -> int:
         "association/netdev": b"netdev=eth0" in transcript,
         "hostname mismatch rejected": negative_pass,
         "trusted TLS + hostname": positive_pass,
+        "real summary/advice/LCD/TTS pipeline" if args.coach else
+        "real MiMo TTS PCM speaker pipeline" if args.tts else
         "real MiMo HTTP/semantic response": mimo_pass,
     }
+    if args.sd_readonly:
+        checks["shared SD existing-file read before/after cloud"] = sd_pass
     for name, passed in checks.items():
         print(f"CHECK {name}: {'PASS' if passed else 'FAIL'}")
     return 0 if all(checks.values()) else 2

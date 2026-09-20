@@ -50,6 +50,8 @@ int velafit_pose_infer(const uint8_t *rgb_image,
                        pose_frame_t *out_pose,
                        velafit_perf_t *perf);
 
+void velafit_pose_profile_set(bool enabled);
+
 #ifdef __cplusplus
 }
 #endif

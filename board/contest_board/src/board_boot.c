@@ -22,6 +22,7 @@
 #include "board_touch.h"
 #include "board_sdmmc.h"
 #include "board_c6_wifi.h"
+#include "board_display.h"
 
 /****************************************************************************
  * Public Functions
@@ -93,6 +94,15 @@ int board_app_initialize(uintptr_t arg)
   if (ret < 0)
     {
       return ret;
+    }
+#endif
+
+#ifdef CONFIG_ESP32P4_MIPI_DSI
+  ret = board_display_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: MIPI DSI display initialization failed: %d\n",
+             ret);
     }
 #endif
 

@@ -7,6 +7,13 @@ include $(TOPDIR)/tools/Config.mk
 include $(TOPDIR)/tools/espressif/Config.mk
 include $(TOPDIR)/arch/risc-v/src/common/Toolchain.defs
 
+# Explicit experimental build only: the upstream HWLP relocations need the
+# pinned Espressif linker. The remaining compilation stays on project GCC13.
+ifneq ($(VELAFIT_ESP_NN_LIB),)
+LD = $(dir $(VELAFIT_PIE_CC))riscv32-esp-elf-ld
+EXTRA_LIBS += $(VELAFIT_ESP_NN_LIB)
+endif
+
 CHIP_SERIES = $(patsubst "%",%,$(CONFIG_ESPRESSIF_CHIP_SERIES))
 
 ARCHSCRIPT += $(BOARD_DIR)/scripts/$(CHIP_SERIES)_aliases.ld

@@ -132,6 +132,19 @@ void one_euro_pose_filter_apply(one_euro_pose_filter_t *filter,
   for (int i = 0; i < VELAFIT_NUM_KEYPOINTS; i++)
     {
       one_euro_point_t *pt = &filter->points[i];
+      /* A missing/non-finite observation must not poison persistent filter
+       * state. Reinitialize this point when a valid observation returns. */
+      if (!raw_pose->valid || !isfinite(raw_pose->kpts[i].x) ||
+          !isfinite(raw_pose->kpts[i].y) ||
+          !isfinite(raw_pose->kpts[i].score) || raw_pose->kpts[i].score < 0.3f)
+        {
+          pt->x_filt.initialized = false;
+          pt->y_filt.initialized = false;
+          filtered_pose->kpts[i].x = 0.0f;
+          filtered_pose->kpts[i].y = 0.0f;
+          filtered_pose->kpts[i].score = 0.0f;
+          continue;
+        }
       filtered_pose->kpts[i].x =
         one_euro_filter_step(&pt->x_filt,
                              raw_pose->kpts[i].x,

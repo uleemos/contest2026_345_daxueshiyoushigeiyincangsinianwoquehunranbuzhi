@@ -43,6 +43,7 @@
 #include "velafit_audio_cue.h"
 #include "velafit_storage.h"
 #include "velafit_sync.h"
+#include "velafit_session.h"
 
 /****************************************************************************
  * Public Types
@@ -74,6 +75,14 @@ typedef struct
   uint32_t last_reps;
   uint32_t last_quality_flags;
   char last_feedback_msg[64];
+  velafit_session_t session;
+  bool controlled;
+  bool network_online;
+  uint32_t first_frame_ms;
+  uint32_t last_frame_ms;
+  float measured_fps;
+  uint32_t pose_after_ms;
+  bool summary_saved;
 } velafit_pipeline_t;
 
 /****************************************************************************
@@ -104,6 +113,10 @@ int velafit_pipeline_step_camera_frame(velafit_pipeline_t *pipe,
 
 int velafit_pipeline_step_pose(velafit_pipeline_t *pipe,
                                const pose_frame_t *raw_pose);
+
+int velafit_pipeline_event(velafit_pipeline_t *pipe,
+                           enum velafit_voice_command event, uint64_t now_ms);
+int velafit_pipeline_tick(velafit_pipeline_t *pipe, uint64_t now_ms);
 
 int velafit_pipeline_finish(velafit_pipeline_t *pipe,
                             char *json_buf,

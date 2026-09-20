@@ -52,7 +52,29 @@ typedef struct
   uint32_t rep_start_time_ms;
   uint32_t last_rep_complete_time_ms;
   uint32_t last_quality_flags;
+  uint32_t last_sample_ms;
+  bool have_sample;
+  bool armed;
 } squat_fsm_t;
+
+typedef struct
+{
+  float stand_angle;
+  float descend_angle;
+  float deep_angle;
+  float shallow_angle;
+  float ascend_angle;
+  float valgus_ratio;
+  float trunk_lean_angle;
+  uint32_t minimum_rep_ms;
+} squat_fsm_config_t;
+
+typedef struct
+{
+  squat_fsm_t fsm;
+  float standing_angle;
+  bool standing_valid;
+} squat_fsm_adaptive_t;
 
 /****************************************************************************
  * Public Function Prototypes
@@ -69,7 +91,32 @@ bool squat_fsm_update(squat_fsm_t *fsm,
                       const pose_frame_t *pose,
                       uint32_t timestamp_ms);
 
+bool squat_fsm_update_confidence(squat_fsm_t *fsm,
+                                 const pose_frame_t *pose,
+                                 uint32_t timestamp_ms,
+                                 float minimum_score);
+
+bool squat_fsm_update_config(squat_fsm_t *fsm,
+                             const pose_frame_t *pose,
+                             uint32_t timestamp_ms,
+                             float minimum_score,
+                             const squat_fsm_config_t *config);
+
+void squat_fsm_adaptive_init(squat_fsm_adaptive_t *tracker);
+
+/* Clear acceptance counters at the countdown boundary while retaining the
+ * standing baseline and the fact that a valid standing pose was observed. */
+void squat_fsm_adaptive_begin_capture(squat_fsm_adaptive_t *tracker);
+
+bool squat_fsm_adaptive_update(squat_fsm_adaptive_t *tracker,
+                               const pose_frame_t *pose,
+                               uint32_t timestamp_ms,
+                               float minimum_score);
+
 void squat_fsm_reset_counters(squat_fsm_t *fsm);
+
+/* Cancel an interrupted repetition, preserving completed counters. */
+void squat_fsm_interrupt(squat_fsm_t *fsm);
 
 #ifdef __cplusplus
 }

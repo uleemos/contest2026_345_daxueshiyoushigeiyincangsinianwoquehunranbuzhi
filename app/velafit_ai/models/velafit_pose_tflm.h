@@ -15,6 +15,8 @@ extern "C"
 #endif
 
 int velafit_pose_tflm_init(void);
+int velafit_pose_pie_compare(void);
+int velafit_pose_pie_ram_compare(void);
 void velafit_pose_tflm_deinit(void);
 int velafit_pose_tflm_infer(const uint8_t *rgb192,
                             pose_frame_t *out_pose,

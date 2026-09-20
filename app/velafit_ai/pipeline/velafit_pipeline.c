@@ -260,16 +260,90 @@ out:
  * Name: velafit_pipeline_step_pose
  ****************************************************************************/
 
+int velafit_pipeline_tick(velafit_pipeline_t *pipe, uint64_t now_ms)
+{
+  if (!pipe) return -EINVAL;
+  int ret = velafit_session_tick(&pipe->session, now_ms);
+  if (!ret && pipe->controlled)
+    {
+      pipe->stats.duration_sec = pipe->session.active_ms / 1000;
+      velafit_render_session_status(&pipe->canvas,
+        velafit_session_state_name(pipe->session.state),
+        pipe->stats.duration_sec,pipe->session.awake,pipe->network_online);
+    }
+  return ret;
+}
+
+int velafit_pipeline_event(velafit_pipeline_t *pipe,
+                           enum velafit_voice_command event, uint64_t now_ms)
+{
+  if (!pipe) return -EINVAL;
+  int ret = velafit_session_event(&pipe->session, event, now_ms);
+  if (ret) return ret;
+  pipe->controlled = true;
+  if (event == VELAFIT_VOICE_START || event == VELAFIT_VOICE_RESUME)
+    pipe->pose_after_ms = (uint32_t)now_ms;
+  if (event == VELAFIT_VOICE_START)
+    {
+      squat_fsm_init(&pipe->squat_fsm);
+      jumping_jack_fsm_init(&pipe->jj_fsm);
+      pushup_fsm_init(&pipe->pushup_fsm);
+      plank_fsm_init(&pipe->plank_fsm);
+      memset(&pipe->stats, 0, sizeof(pipe->stats));
+      snprintf(pipe->stats.exercise_type, sizeof(pipe->stats.exercise_type),
+               "%s", pipe->exercise_name);
+      snprintf(pipe->stats.session_id, sizeof(pipe->stats.session_id),
+               "VF-%llu-%lu", (unsigned long long)now_ms,
+               (unsigned long)pipe->session.generation);
+      pipe->frame_count = pipe->last_reps = 0;
+      pipe->summary_saved = false;
+      pipe->last_quality_flags = 0;
+    }
+  if (event == VELAFIT_VOICE_START || event == VELAFIT_VOICE_PAUSE ||
+      event == VELAFIT_VOICE_STOP)
+    {
+      squat_fsm_interrupt(&pipe->squat_fsm);
+      one_euro_pose_filter_init(&pipe->pose_filter, 1.0f, 0.007f, 1.0f);
+    }
+  pipe->stats.duration_sec = pipe->session.active_ms / 1000;
+  return 0;
+}
+
 int velafit_pipeline_step_pose(velafit_pipeline_t *pipe,
                                const pose_frame_t *raw_pose)
 {
-  if (pipe == NULL || raw_pose == NULL || !raw_pose->valid)
+  if (pipe == NULL || raw_pose == NULL)
     {
       return -EINVAL;
     }
 
+  if (pipe->controlled && pipe->session.state != VF_RUNNING)
+    return -EAGAIN;
+
+  if (pipe->controlled &&
+      (int32_t)(raw_pose->timestamp_ms - pipe->pose_after_ms) < 0)
+    return -ESTALE;
+  if (pipe->frame_count &&
+      (int32_t)(raw_pose->timestamp_ms - pipe->last_frame_ms) <= 0)
+    return -ESTALE;
+
+  if (!raw_pose->valid)
+    {
+      squat_fsm_interrupt(&pipe->squat_fsm);
+      one_euro_pose_filter_init(&pipe->pose_filter, 1.0f, 0.007f, 1.0f);
+      snprintf(pipe->last_feedback_msg, sizeof(pipe->last_feedback_msg),
+               "PERSON NOT VISIBLE");
+      return -EAGAIN;
+    }
+
   pose_frame_t filtered_pose;
   uint32_t t_ms = raw_pose->timestamp_ms;
+  if (pipe->frame_count == 0) pipe->first_frame_ms = t_ms;
+  if (pipe->frame_count && t_ms != pipe->last_frame_ms)
+    pipe->measured_fps = 1000.0f / (uint32_t)(t_ms - pipe->last_frame_ms);
+  pipe->last_frame_ms = t_ms;
+  if (!pipe->controlled)
+    pipe->stats.duration_sec = (t_ms - pipe->first_frame_ms) / 1000;
   pipe->frame_count++;
 
   /* 1. Apply One-Euro Pose Filter */
@@ -448,7 +522,7 @@ int velafit_pipeline_step_pose(velafit_pipeline_t *pipe,
     }
 
   float cur_cal = velafit_calc_calories(pipe->exercise_name,
-                                        pipe->frame_count / 30,
+                                        pipe->stats.duration_sec,
                                         100.0f,
                                         VELAFIT_DEFAULT_USER_WEIGHT_KG);
 
@@ -459,13 +533,17 @@ int velafit_pipeline_step_pose(velafit_pipeline_t *pipe,
                            pipe->exercise_name,
                            cur_reps,
                            cur_cal,
-                           30.0f,
+                           pipe->measured_fps,
                            cur_angle,
                            tgt_angle,
                            flags,
                            pipe->last_feedback_msg);
 
   /* 5. Blast to Framebuffer if available */
+
+  velafit_render_session_status(&pipe->canvas,
+    pipe->controlled ? velafit_session_state_name(pipe->session.state) : "REPLAY",
+    pipe->stats.duration_sec,pipe->session.awake,pipe->network_online);
 
   velafit_render_to_fb0(&pipe->canvas);
 
@@ -485,15 +563,13 @@ int velafit_pipeline_finish(velafit_pipeline_t *pipe,
       return -EINVAL;
     }
 
-  /* Play workout finish fanfare */
+  if (pipe->controlled && pipe->session.state != VF_FINISHED)
+    return -EAGAIN;
 
-  velafit_audio_cue_play(VELAFIT_AUDIO_CUE_FINISH);
+  /* Play workout finish fanfare only once persistence succeeds below. */
 
-  pipe->stats.duration_sec = pipe->frame_count / 30;
-  if (pipe->stats.duration_sec == 0)
-    {
-      pipe->stats.duration_sec = 1;
-    }
+  /* Duration comes from monotonic session ticks (or replay timestamps),
+   * never an assumed 30 FPS. Zero-length cancelled sessions remain zero. */
 
   if (pipe->exercise_id == VELAFIT_EXERCISE_SQUAT)
     {
@@ -527,7 +603,7 @@ int velafit_pipeline_finish(velafit_pipeline_t *pipe,
 
   if (json_buf != NULL && json_max_len > 0)
     {
-      snprintf(json_buf, json_max_len,
+      int length = snprintf(json_buf, json_max_len,
                "{\n"
                "  \"version\": \"1.0.0\",\n"
                "  \"session_id\": \"%s\",\n"
@@ -571,6 +647,9 @@ int velafit_pipeline_finish(velafit_pipeline_t *pipe,
                pipe->stats.min_elbow_angle,
                (unsigned long)pipe->frame_count);
 
+      if (length < 0 || (size_t)length >= json_max_len)
+        return -ENOSPC;
+
       /* Persist session record to local storage */
 
       velafit_session_record_t rec;
@@ -587,7 +666,14 @@ int velafit_pipeline_finish(velafit_pipeline_t *pipe,
       rec.accuracy_pct = pipe->stats.accuracy_pct;
       rec.sync_status = VELAFIT_SYNC_PENDING;
 
-      velafit_storage_save_session(&rec, json_buf);
+      if (pipe->summary_saved) return OK;
+      int ret = velafit_storage_save_session(&rec, json_buf);
+      if (!ret)
+        {
+          pipe->summary_saved = true;
+          velafit_audio_cue_play(VELAFIT_AUDIO_CUE_FINISH);
+        }
+      return ret;
     }
 
   return OK;

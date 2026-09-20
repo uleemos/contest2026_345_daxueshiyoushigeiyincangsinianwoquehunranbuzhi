@@ -31,6 +31,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "velafit_types.h"
 #include "esp_nn_ops.h"
@@ -55,6 +56,10 @@
 #include "velafit_config.h"
 #include "velafit_ppa_bench.h"
 #include "velafit_touch.h"
+#if defined(CONFIG_VELAFIT_POSE_BACKEND_TFLM) && defined(VELAFIT_TINY_POSE)
+#include "velafit_tiny_pose_tflm.h"
+#include "velafit_tiny_pose_preprocess.h"
+#endif
 #ifdef CONFIG_VELAFIT_CAMERA_SC2336
 #include "sc2336_capture.h"
 #endif
@@ -77,9 +82,16 @@ static void print_usage(void)
   printf("  benchmark            - Stage 1: ESP-NN SIMD Benchmarks\n");
   printf("  ppa                  - Stage 1: PPA 2D Hardware Benchmarks\n");
   printf("  test_pose            - Stage 2: 17 Keypoint Pose Inference\n");
+#if defined(CONFIG_VELAFIT_POSE_BACKEND_TFLM) && defined(VELAFIT_TINY_POSE)
+  printf("  pose_tiny_bench [n]  - Trained INT8 TinyPose Invoke latency\n");
+#endif
 #ifdef CONFIG_VELAFIT_CAMERA_SC2336
   printf("  camera_input [dump]  - RAW10 -> 192x192 RGB capture/export\n");
   printf("  camera_pose          - Camera RGB -> MoveNet -> 17 keypoints\n");
+#if defined(CONFIG_VELAFIT_POSE_BACKEND_TFLM) && defined(VELAFIT_TINY_POSE)
+  printf("  camera_tiny_pose     - Camera -> TinyPose -> squat FSM timing\n");
+  printf("  tiny_input_dump      - Export final pre-quantization RGB96 input\n");
+#endif
 #endif
   printf("  test_squat  [count]  - Stage 3: Squat FSM & Quality Audit\n");
   printf("  test_jj     [count]  - Stage 3: Jumping Jack FSM Simulation\n");
@@ -222,7 +234,8 @@ static int write_camera_ppm(const char *path, const uint8_t *rgb)
   return 0;
 }
 
-static int dump_file_base64(const char *path)
+static int dump_file_base64_marked(const char *path, const char *begin,
+                                   const char *end)
 {
   static const char alphabet[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -235,7 +248,7 @@ static int dump_file_base64(const char *path)
       return -errno;
     }
 
-  printf("VELAFIT_CAMERA_PPM_BASE64_BEGIN\n");
+  printf("%s\n", begin);
   while (1)
     {
       size_t n = fread(in, 1, sizeof(in), fp);
@@ -270,9 +283,16 @@ static int dump_file_base64(const char *path)
     }
 
   fclose(fp);
-  printf("VELAFIT_CAMERA_PPM_BASE64_END\n");
+  printf("%s\n", end);
   fflush(stdout);
   return 0;
+}
+
+static int dump_file_base64(const char *path)
+{
+  return dump_file_base64_marked(path,
+    "VELAFIT_CAMERA_PPM_BASE64_BEGIN",
+    "VELAFIT_CAMERA_PPM_BASE64_END");
 }
 
 static int cmd_camera(bool infer, bool dump)
@@ -370,6 +390,152 @@ static int cmd_camera(bool infer, bool dump)
   free(rgb);
   return ret;
 }
+
+#if defined(CONFIG_VELAFIT_POSE_BACKEND_TFLM) && defined(VELAFIT_TINY_POSE)
+#define TINYPOSE_FSM_MIN_SCORE 0.20f
+static uint64_t tiny_camera_time_us(void)
+{
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (uint64_t)now.tv_sec * 1000000ull + now.tv_nsec / 1000;
+}
+
+static int cmd_camera_tiny_pose(void)
+{
+  static const int points[] =
+    {
+      KPT_LEFT_SHOULDER, KPT_RIGHT_SHOULDER,
+      KPT_LEFT_HIP, KPT_RIGHT_HIP, KPT_LEFT_KNEE, KPT_RIGHT_KNEE,
+      KPT_LEFT_ANKLE, KPT_RIGHT_ANKLE
+    };
+  static const char *names[] =
+    {
+      "left_shoulder", "right_shoulder", "left_hip", "right_hip",
+      "left_knee", "right_knee", "left_ankle", "right_ankle"
+    };
+  const size_t image_size = 192 * 192 * 3;
+  struct sc2336_rgb_capture_s capture;
+  pose_frame_t pose;
+  velafit_perf_t perf;
+  squat_fsm_t fsm;
+  uint8_t *rgb = malloc(image_size);
+  if (rgb == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  uint64_t init_started = tiny_camera_time_us();
+  int ret = velafit_tiny_pose_init();
+  uint64_t init_us = tiny_camera_time_us() - init_started;
+  if (ret < 0)
+    {
+      printf("TINYPOSE-CAMERA init=FAIL ret=%d init_us=%" PRIu64 "\n",
+             ret, init_us);
+      free(rgb);
+      return ret;
+    }
+
+  const uint64_t total_started = tiny_camera_time_us();
+  ret = sc2336_capture_rgb888_letterbox(rgb, image_size, 192, 192,
+                                        &capture);
+  if (ret < 0)
+    {
+      printf("TINYPOSE-CAMERA capture=FAIL ret=%d\n", ret);
+      goto out;
+    }
+
+  ret = velafit_tiny_pose_infer_rgb192(rgb, &pose, &perf);
+  if (ret != 0 && ret != -ENODATA)
+    {
+      printf("TINYPOSE-CAMERA inference=FAIL ret=%d\n", ret);
+      goto out;
+    }
+
+  squat_fsm_init(&fsm);
+  const uint64_t fsm_started = tiny_camera_time_us();
+  (void)squat_fsm_update_confidence(&fsm, &pose, pose.timestamp_ms,
+                                    TINYPOSE_FSM_MIN_SCORE);
+  perf.fsm_us = tiny_camera_time_us() - fsm_started;
+  const uint64_t end_to_end_us = tiny_camera_time_us() - total_started;
+  unsigned int fsm_points = 0;
+  for (unsigned int i = 0; i < 8; i++)
+    {
+      fsm_points += pose.kpts[points[i]].score >= TINYPOSE_FSM_MIN_SCORE;
+    }
+  printf("TINYPOSE-CAMERA result=PASS renderable=%s fsm_ready=%s "
+         "fsm_points=%u/8 init_us=%" PRIu64
+         " capture_us=%" PRIu64 " convert_us=%" PRIu64
+         " preprocess_us=%" PRIu32 " invoke_us=%" PRIu32
+         " postprocess_us=%" PRIu32 " fsm_us=%" PRIu32
+         " end_to_end_us=%" PRIu64 "\n",
+         pose.valid ? "yes" : "no", fsm_points == 8 ? "yes" : "no",
+         fsm_points, init_us, capture.capture_us,
+         capture.convert_us, perf.preprocess_us, perf.infer_us,
+         perf.postprocess_us, perf.fsm_us, end_to_end_us);
+  printf("TINYPOSE-CAMERA excluded_from_invoke=camera,RGB-conversion,resize,"
+         "postprocess,FSM,render,cold-init\n");
+  for (unsigned int i = 0; i < 8; i++)
+    {
+      const kpt_2d_t *point = &pose.kpts[points[i]];
+      printf("TINYPOSE-CAMERA kpt=%s x=%.3f y=%.3f score=%.3f accepted=%s\n",
+             names[i], point->x, point->y, point->score,
+             point->score >= TINYPOSE_FSM_MIN_SCORE ? "yes" : "no");
+    }
+  ret = 0;
+
+out:
+  velafit_tiny_pose_deinit();
+  free(rgb);
+  return ret;
+}
+
+static int cmd_tiny_input_dump(void)
+{
+  static const char path[] = "/tmp/velafit-tiny-input-96.ppm";
+  const size_t rgb192_size = 192 * 192 * 3;
+  const size_t rgb96_size = 96 * 96 * 3;
+  struct sc2336_rgb_capture_s capture;
+  uint8_t *rgb192 = malloc(rgb192_size);
+  uint8_t *rgb96 = malloc(rgb96_size);
+  if (!rgb192 || !rgb96)
+    {
+      free(rgb192);
+      free(rgb96);
+      return -ENOMEM;
+    }
+
+  int ret = sc2336_capture_rgb888_letterbox(rgb192, rgb192_size, 192, 192,
+                                             &capture);
+  if (ret < 0) goto out;
+  velafit_tiny_pose_debug_rgb96(rgb192, rgb96);
+  FILE *fp = fopen(path, "wb");
+  if (!fp)
+    {
+      ret = -errno;
+      goto out;
+    }
+  bool write_failed = fprintf(fp, "P6\n96 96\n255\n") < 0 ||
+                      fwrite(rgb96, 1, rgb96_size, fp) != rgb96_size;
+  if (fclose(fp) != 0) write_failed = true;
+  if (write_failed)
+    {
+      ret = -EIO;
+      goto out;
+    }
+  printf("TINYPOSE-INPUT-DUMP sensor=1280x720_RAW10 "
+         "S_to_capture=CCW90_letterbox_192 "
+         "capture_to_M=area2x2_96_no_rotation quantization=excluded "
+         "visual_rounding=nearest path=%s\n", path);
+  ret = dump_file_base64_marked(path,
+    "VELAFIT_TINY_INPUT_PPM_BASE64_BEGIN",
+    "VELAFIT_TINY_INPUT_PPM_BASE64_END");
+
+out:
+  free(rgb192);
+  free(rgb96);
+  return ret;
+}
+#endif
 #endif
 
 /****************************************************************************
@@ -1270,9 +1436,89 @@ int main(int argc, char *argv[])
     {
       esp_nn_run_benchmarks();
     }
+  else if (strcmp(cmd, "cpu_clock") == 0)
+    {
+      extern int velafit_cpu_clock_probe(void);
+      ret = velafit_cpu_clock_probe();
+    }
+  else if (strcmp(cmd, "hwlp_probe") == 0)
+    {
+      extern int velafit_hwlp_probe(void);
+      ret = velafit_hwlp_probe();
+    }
+  else if (strcmp(cmd, "hwlp_switch") == 0)
+    {
+      extern int velafit_hwlp_switch_probe(void);
+      ret = velafit_hwlp_switch_probe();
+    }
+  else if (strcmp(cmd, "esp_nn_probe") == 0)
+    {
+      extern int velafit_esp_nn_probe(void);
+      ret = velafit_esp_nn_probe();
+    }
+  else if (strcmp(cmd, "pie_switch") == 0)
+    {
+      extern int velafit_pie_switch_probe(void);
+      ret = velafit_pie_switch_probe();
+    }
+  else if (strcmp(cmd, "pie_probe") == 0)
+    {
+      extern int velafit_pie_probe(void);
+      ret = velafit_pie_probe();
+    }
   else if (strcmp(cmd, "ppa") == 0)
     {
       ret = velafit_ppa_run_benchmarks();
+    }
+  else if (strcmp(cmd, "fpu_context") == 0)
+    {
+      extern int velafit_fpu_probe(void);
+      ret = velafit_fpu_probe();
+    }
+  else if (strcmp(cmd, "pose_bench") == 0 || strcmp(cmd, "pose_fastbench") == 0)
+    {
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+      extern int velafit_pose_pie_benchmark(unsigned int rounds);
+      extern int velafit_pose_pie_fast_benchmark(unsigned int rounds);
+      char *end = NULL;
+      unsigned long rounds = argc == 3 ? strtoul(argv[2], &end, 10) : 10;
+      ret = argc > 3 || (argc == 3 && (end == argv[2] || *end)) ||
+            rounds == 0 || rounds > 1000 ? -EINVAL :
+            (strcmp(cmd, "pose_fastbench") == 0 ? velafit_pose_pie_fast_benchmark(rounds) :
+                                                 velafit_pose_pie_benchmark(rounds));
+#else
+      ret = -ENOTSUP;
+#endif
+    }
+  else if (strcmp(cmd, "pose_tiny_bench") == 0)
+    {
+#if defined(CONFIG_VELAFIT_POSE_BACKEND_TFLM) && defined(VELAFIT_TINY_POSE)
+      char *end = NULL;
+      unsigned long rounds = argc == 3 ? strtoul(argv[2], &end, 10) : 100;
+      ret = argc > 3 || (argc == 3 && (end == argv[2] || *end)) ||
+            rounds == 0 || rounds > 1000 ? -EINVAL :
+            velafit_tiny_pose_benchmark(rounds);
+#else
+      ret = -ENOTSUP;
+#endif
+    }
+  else if (strcmp(cmd, "pose_compare_ram") == 0)
+    {
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+      extern int velafit_pose_pie_ram_compare(void);
+      ret = velafit_pose_pie_ram_compare();
+#else
+      ret = -ENOTSUP;
+#endif
+    }
+  else if (strcmp(cmd, "pose_compare") == 0)
+    {
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+      extern int velafit_pose_pie_compare(void);
+      ret = velafit_pose_pie_compare();
+#else
+      ret = -ENOTSUP;
+#endif
     }
   else if (strcmp(cmd, "test_pose") == 0)
     {
@@ -1286,6 +1532,38 @@ int main(int argc, char *argv[])
   else if (strcmp(cmd, "camera_pose") == 0)
     {
       ret = cmd_camera(true, false);
+    }
+#if defined(CONFIG_VELAFIT_POSE_BACKEND_TFLM) && defined(VELAFIT_TINY_POSE)
+  else if (strcmp(cmd, "camera_tiny_pose") == 0)
+    {
+      ret = cmd_camera_tiny_pose();
+    }
+  else if (strcmp(cmd, "tiny_input_dump") == 0)
+    {
+      ret = cmd_tiny_input_dump();
+    }
+#endif
+#endif
+#ifdef CONFIG_VELAFIT_POSE_BACKEND_TFLM
+  else if (strcmp(cmd, "mww_control") == 0)
+    {
+      extern int velafit_mww_probe(unsigned count);
+      ret = velafit_mww_probe(argc >= 3 ? (unsigned)atoi(argv[2]) : 1000);
+    }
+  else if (strcmp(cmd, "mww_development") == 0)
+    {
+      extern int velafit_mww_development_probe(unsigned count);
+      ret = velafit_mww_development_probe(argc >= 3 ? (unsigned)atoi(argv[2]) : 1000);
+    }
+  else if (strcmp(cmd, "mww_chain") == 0)
+    {
+      extern int velafit_mww_chain_probe(void);
+      ret = velafit_mww_chain_probe();
+    }
+  else if (strcmp(cmd, "mww_frontend") == 0)
+    {
+      extern int velafit_mww_frontend_probe(void);
+      ret = velafit_mww_frontend_probe();
     }
 #endif
   else if (strcmp(cmd, "test_squat") == 0)

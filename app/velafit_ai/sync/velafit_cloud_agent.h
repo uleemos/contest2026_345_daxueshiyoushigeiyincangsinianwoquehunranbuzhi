@@ -31,7 +31,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "velafit_mimo_protocol.h"
+#include "../include/velafit_mimo_protocol.h"
 
 /****************************************************************************
  * Public Function Prototypes
@@ -43,6 +43,13 @@ extern "C"
 #endif
 
 int velafit_cloud_agent_init(void);
+
+/* Synchronous transport; no retained key/context and no implicit mock. */
+typedef int (*velafit_cloud_transport_t)(void *ctx, const char *request,
+                                        char *content, size_t capacity);
+int velafit_cloud_agent_submit_workout_via(
+      const char *session_json, velafit_mimo_prescription_t *out_presc,
+      velafit_cloud_transport_t transport, void *ctx);
 
 void velafit_cloud_agent_deinit(void);
 

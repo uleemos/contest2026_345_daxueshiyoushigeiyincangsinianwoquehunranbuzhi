@@ -1,0 +1,7 @@
+# Local synthetic test asset, regenerated with tools/hardware scripts.
+voice_fixture.h
+voice_fixture.wav
+kws_acoustic_fixture.h
+kws_v3_fixture.h
+kws_bank_fixture.h
+kws_live_bank_fixture.h

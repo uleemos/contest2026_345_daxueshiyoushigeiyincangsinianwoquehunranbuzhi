@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "sc2336_capture.h"
+#include "sc2336_transform.h"
 
 static uint16_t raw10_at(const uint8_t *raw, uint16_t width,
                          uint16_t x, uint16_t y)
@@ -142,6 +143,185 @@ static uint16_t wb_gain_q8(uint16_t target, uint8_t linear_mean)
   return (uint16_t)gain;
 }
 
+static uint8_t correct_channel(uint8_t value, uint16_t gain,
+                               const uint8_t *gamma_lut)
+{
+  uint32_t linear = value > 16 ? value - 16 : 0;
+  uint32_t corrected = linear * gain / 256;
+
+  if (corrected > 255)
+    {
+      corrected = 255;
+    }
+
+  return gamma_lut[corrected];
+}
+
+/* Counterclockwise image rotation compensates the module's clockwise roll
+ * as viewed by a person facing the lens. Demosaic in SENSOR coordinates so
+ * rotating the image does not change the Bayer color interpretation.
+ */
+
+static void portrait_sample(const uint8_t *raw, uint16_t raw_w,
+                            uint16_t raw_h, uint16_t x, uint16_t y,
+                            uint8_t *rgb)
+{
+  uint16_t sx = raw_w - 1 - y;
+  uint16_t sy = x;
+
+  if (sx == 0) sx = 1;
+  if (sx >= raw_w - 1) sx = raw_w - 2;
+  if (sy == 0) sy = 1;
+  if (sy >= raw_h - 1) sy = raw_h - 2;
+  demosaic_bggr(raw, raw_w, sx, sy, rgb);
+}
+
+int sc2336_raw10_bggr_preview_rgb565(const uint8_t *raw, size_t raw_len,
+                                     uint16_t raw_w, uint16_t raw_h,
+                                     uint16_t *fb, size_t fb_len,
+                                     uint16_t fb_w, uint16_t fb_h,
+                                     uint16_t fb_stride)
+{
+  uint32_t sum_r = 0;
+  uint32_t sum_g = 0;
+  uint32_t sum_b = 0;
+  uint16_t sample_count = 0;
+  uint16_t gain_r;
+  uint16_t gain_g;
+  uint16_t gain_b;
+  uint16_t target;
+  uint16_t preview_w;
+  uint16_t preview_h;
+  uint16_t offset_x;
+  uint16_t offset_y;
+  uint16_t crop_w;
+  uint16_t crop_h;
+  uint16_t red565[256];
+  uint16_t green565[256];
+  uint16_t blue565[256];
+  uint8_t gamma_lut[256];
+  uint8_t rgb[3];
+  /* Visual feedback requires CCW90 relative to the native preview.
+   * Cover the display with a centered crop, preserving aspect ratio.
+   */
+  const uint16_t view_w = raw_h;
+  const uint16_t view_h = raw_w;
+
+  if (raw == NULL || fb == NULL || raw_w < 4 || raw_h < 3 ||
+      (raw_w & 3) != 0 || fb_w < 2 || fb_h < 2 ||
+      (fb_w & 1) != 0 || (fb_h & 1) != 0 || fb_stride < fb_w ||
+      raw_len < (size_t)raw_w * raw_h * 5 / 4 ||
+      fb_len < (size_t)fb_stride * fb_h * sizeof(uint16_t))
+    {
+      return -EINVAL;
+    }
+
+  /* Render to every 2x2 display block. Crop in rotated source coordinates:
+   * native 1024x600 uses 720x421 of the 720x1280 rotated view. On the
+   * physically upright panel this removes left/right, not head/feet.
+   */
+
+  preview_w = fb_w / 2;
+  preview_h = fb_h / 2;
+  struct sc2336_rect crop = sc2336_cover(view_w, view_h, fb_w, fb_h);
+  crop_w = crop.w;
+  crop_h = crop.h;
+
+  if (crop_w == 0 || crop_h == 0)
+    {
+      return -EINVAL;
+    }
+
+  offset_x = (view_w - crop_w) / 2;
+  offset_y = (view_h - crop_h) / 2;
+
+  /* Estimate gray-world white balance from a sparse 16x9 grid. */
+
+  for (uint16_t gy = 0; gy < 9; gy++)
+    {
+      uint16_t sy = 1 + (uint16_t)(((uint32_t)(2 * gy + 1) *
+                                    (view_h - 2)) / 18);
+      for (uint16_t gx = 0; gx < 16; gx++)
+        {
+          uint16_t sx = 1 + (uint16_t)(((uint32_t)(2 * gx + 1) *
+                                        (view_w - 2)) / 32);
+          portrait_sample(raw, raw_w, raw_h, sx, sy, rgb);
+          sum_r += rgb[0];
+          sum_g += rgb[1];
+          sum_b += rgb[2];
+          sample_count++;
+        }
+    }
+
+  target = (uint16_t)(((sum_r / sample_count > 16 ?
+                        sum_r / sample_count - 16 : 1) +
+                       (sum_g / sample_count > 16 ?
+                        sum_g / sample_count - 16 : 1) +
+                       (sum_b / sample_count > 16 ?
+                        sum_b / sample_count - 16 : 1)));
+  if (target > 192)
+    {
+      target = 192;
+    }
+
+  gain_r = wb_gain_q8(target, (uint8_t)(sum_r / sample_count));
+  gain_g = wb_gain_q8(target, (uint8_t)(sum_g / sample_count));
+  gain_b = wb_gain_q8(target, (uint8_t)(sum_b / sample_count));
+  for (uint16_t value = 0; value < 256; value++)
+    {
+      gamma_lut[value] = sqrt_u16((uint16_t)(value * 255));
+    }
+
+  memset(fb, 0, (size_t)fb_stride * fb_h * sizeof(uint16_t));
+  for (uint16_t value = 0; value < 256; value++)
+    {
+      red565[value] = (correct_channel(value, gain_r, gamma_lut) & 0xf8) << 8;
+      green565[value] = (correct_channel(value, gain_g, gamma_lut) & 0xfc) << 3;
+      blue565[value] = correct_channel(value, gain_b, gamma_lut) >> 3;
+    }
+
+  for (uint16_t dy = 0; dy < preview_h; dy++)
+    {
+      uint16_t sy = offset_y +
+        (uint16_t)(((uint32_t)(2 * dy + 1) * crop_h) / (2 * preview_h));
+      uint16_t *line0 = fb + (size_t)(dy * 2) * fb_stride;
+      uint16_t *line1 = line0 + fb_stride;
+
+      if (sy == 0)
+        {
+          sy = 1;
+        }
+      else if (sy >= view_h - 1)
+        {
+          sy = view_h - 2;
+        }
+
+      for (uint16_t dx = 0; dx < preview_w; dx++)
+        {
+          uint16_t sx = offset_x +
+            (uint16_t)(((uint32_t)(2 * dx + 1) * crop_w) / (2 * preview_w));
+          uint16_t pixel;
+
+          if (sx == 0)
+            {
+              sx = 1;
+            }
+          else if (sx >= view_w - 1)
+            {
+              sx = view_w - 2;
+            }
+
+          portrait_sample(raw, raw_w, raw_h, sx, sy, rgb);
+          pixel = red565[rgb[0]] | green565[rgb[1]] | blue565[rgb[2]];
+          line0[dx * 2] = pixel;
+          line0[dx * 2 + 1] = pixel;
+          line1[dx * 2] = pixel;
+          line1[dx * 2 + 1] = pixel;
+        }
+    }
+  return 0;
+}
+
 int sc2336_raw10_bggr_letterbox(const uint8_t *raw, size_t raw_len,
                                 uint16_t raw_w, uint16_t raw_h,
                                 uint8_t *rgb, size_t rgb_len,
@@ -160,6 +340,9 @@ int sc2336_raw10_bggr_letterbox(const uint8_t *raw, size_t raw_len,
   uint16_t offset_x;
   uint16_t offset_y;
 
+  const uint16_t view_w = raw_h;
+  const uint16_t view_h = raw_w;
+
   if (raw == NULL || rgb == NULL || result == NULL || raw_w < 4 ||
       raw_h < 3 || rgb_w == 0 || rgb_h == 0 || (raw_w & 3) != 0)
     {
@@ -173,16 +356,9 @@ int sc2336_raw10_bggr_letterbox(const uint8_t *raw, size_t raw_len,
       return -EMSGSIZE;
     }
 
-  if ((uint32_t)rgb_w * raw_h <= (uint32_t)rgb_h * raw_w)
-    {
-      content_w = rgb_w;
-      content_h = (uint16_t)(((uint32_t)raw_h * rgb_w) / raw_w);
-    }
-  else
-    {
-      content_h = rgb_h;
-      content_w = (uint16_t)(((uint32_t)raw_w * rgb_h) / raw_h);
-    }
+  struct sc2336_rect fit = sc2336_fit(view_w, view_h, rgb_w, rgb_h);
+  content_w = fit.w;
+  content_h = fit.h;
 
   if (content_w == 0 || content_h == 0)
     {
@@ -195,20 +371,20 @@ int sc2336_raw10_bggr_letterbox(const uint8_t *raw, size_t raw_len,
 
   for (uint16_t dy = 0; dy < content_h; dy++)
     {
-      uint16_t sy = (uint16_t)(((uint32_t)(2 * dy + 1) * raw_h) /
+      uint16_t sy = (uint16_t)(((uint32_t)(2 * dy + 1) * view_h) /
                                (2 * content_h));
       if (sy == 0) sy = 1;
-      if (sy >= raw_h - 1) sy = raw_h - 2;
+      if (sy >= view_h - 1) sy = view_h - 2;
 
       for (uint16_t dx = 0; dx < content_w; dx++)
         {
-          uint16_t sx = (uint16_t)(((uint32_t)(2 * dx + 1) * raw_w) /
+          uint16_t sx = (uint16_t)(((uint32_t)(2 * dx + 1) * view_w) /
                                    (2 * content_w));
           uint8_t *pixel = rgb +
                            ((size_t)(offset_y + dy) * rgb_w + offset_x + dx) * 3;
           if (sx == 0) sx = 1;
-          if (sx >= raw_w - 1) sx = raw_w - 2;
-          demosaic_bggr(raw, raw_w, sx, sy, pixel);
+          if (sx >= view_w - 1) sx = view_w - 2;
+          portrait_sample(raw, raw_w, raw_h, sx, sy, pixel);
           sum_r += pixel[0];
           sum_g += pixel[1];
           sum_b += pixel[2];
