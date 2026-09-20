@@ -1,0 +1,4 @@
+interface:
+  display_name: "VelaFit Demo Acceptance"
+  short_description: "Validate and freeze the ESP32-P4 VelaFit demo"
+  default_prompt: "Use $velafit-demo-acceptance to run staged host and hardware acceptance for the VelaFit ESP32-P4 demo."
