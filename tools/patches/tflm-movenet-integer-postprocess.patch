@@ -1,0 +1,216 @@
+diff --git a/tensorflow/lite/micro/kernels/cast.cc b/tensorflow/lite/micro/kernels/cast.cc
+index 60a9afd9..337f6a7b 100644
+--- a/tensorflow/lite/micro/kernels/cast.cc
++++ b/tensorflow/lite/micro/kernels/cast.cc
+@@ -54,6 +54,9 @@ template <typename FromT>
+ TfLiteStatus copyToTensor(TfLiteContext* context, const FromT* in,
+                           TfLiteEvalTensor* out, int num_elements) {
+   switch (out->type) {
++    case kTfLiteUInt8:
++      copyCast(in, out->data.uint8, num_elements);
++      break;
+     case kTfLiteInt8:
+       copyCast(in, out->data.int8, num_elements);
+       break;
+@@ -70,9 +73,9 @@ TfLiteStatus copyToTensor(TfLiteContext* context, const FromT* in,
+       copyCast(in, tflite::micro::GetTensorData<float>(out), num_elements);
+       break;
+     default:
+-      // Unsupported type.
+       MicroPrintf("Output type %s (%d) not supported.",
+                   TfLiteTypeGetName(out->type), out->type);
++      return kTfLiteError;
+   }
+   return kTfLiteOk;
+ }
+@@ -86,6 +89,8 @@ TfLiteStatus CastEval(TfLiteContext* context, TfLiteNode* node) {
+                                       tflite::micro::GetTensorShape(output));
+
+   switch (input->type) {
++    case kTfLiteUInt8:
++      return copyToTensor(context, input->data.uint8, output, num_elements);
+     case kTfLiteInt8:
+       return copyToTensor(context, input->data.int8, output, num_elements);
+     case kTfLiteInt16:
+@@ -105,16 +110,17 @@ TfLiteStatus CastEval(TfLiteContext* context, TfLiteNode* node) {
+       return copyToTensor(context, tflite::micro::GetTensorData<bool>(input),
+                           output, num_elements);
+     default:
+-      // Unsupported type.
+       MicroPrintf("Input type %s (%d) not supported.",
+                   TfLiteTypeGetName(input->type), input->type);
++      return kTfLiteError;
+   }
+-  return kTfLiteOk;
+ }
+
+ #ifdef TFLITE_MODEL_COMPILER
+ std::string getTensorType(TfLiteType type) {
+   switch (type) {
++    case kTfLiteUInt8:
++      return "uint8_t";
+     case kTfLiteInt8:
+       return "int8_t";
+     case kTfLiteInt16:
+diff --git a/tensorflow/lite/micro/kernels/floor_div.cc b/tensorflow/lite/micro/kernels/floor_div.cc
+index 9adf6142..07998122 100644
+--- a/tensorflow/lite/micro/kernels/floor_div.cc
++++ b/tensorflow/lite/micro/kernels/floor_div.cc
+@@ -113,6 +113,9 @@ TfLiteStatus FloorDivEval(TfLiteContext* context, TfLiteNode* node) {
+     case kTfLiteFloat32: {
+       return EvalFloorDiv<float>(context, input1, input2, output);
+     }
++    case kTfLiteInt32: {
++      return EvalFloorDiv<int32_t>(context, input1, input2, output);
++    }
+     default: {
+       MicroPrintf("Type '%s' is not supported by FLOOR_DIV.",
+                   TfLiteTypeGetName(input1->type));
+diff --git a/tensorflow/lite/micro/kernels/floor_div_test.cc b/tensorflow/lite/micro/kernels/floor_div_test.cc
+index 531ee639..5d079261 100644
+--- a/tensorflow/lite/micro/kernels/floor_div_test.cc
++++ b/tensorflow/lite/micro/kernels/floor_div_test.cc
+@@ -105,4 +105,29 @@ TF_LITE_MICRO_TEST(FloorDivTestBroadcastFloat) {
+                                 kExpect, output_data);
+ }
+
++TF_LITE_MICRO_TEST(FloorDivTestInt32) {
++  int kDims[] = {4, 1, 2, 2, 1};
++  constexpr int32_t kInput1[] = {10, -10, -11, 7};
++  constexpr int32_t kInput2[] = {3, 3, -3, -4};
++  constexpr int32_t kExpect[] = {3, -4, 3, -2};
++  constexpr int kOutputCount = std::extent<decltype(kExpect)>::value;
++  int32_t output_data[kOutputCount];
++
++  tflite::testing::TestFloorDiv(kDims, kInput1, kDims, kInput2, kDims, kExpect,
++                                output_data);
++}
++
++TF_LITE_MICRO_TEST(FloorDivTestBroadcastInt32) {
++  int kDims1[] = {4, 1, 2, 2, 1};
++  int kDims2[] = {1, 1};
++  constexpr int32_t kInput1[] = {10, -10, -11, 7};
++  constexpr int32_t kInput2[] = {-3};
++  constexpr int32_t kExpect[] = {-4, 3, 3, -3};
++  constexpr int kOutputCount = std::extent<decltype(kExpect)>::value;
++  int32_t output_data[kOutputCount];
++
++  tflite::testing::TestFloorDiv(kDims1, kInput1, kDims2, kInput2, kDims1,
++                                kExpect, output_data);
++}
++
+ TF_LITE_MICRO_TESTS_END
+diff --git a/tensorflow/lite/micro/kernels/sub.cc b/tensorflow/lite/micro/kernels/sub.cc
+index 888166cd..c28aa628 100644
+--- a/tensorflow/lite/micro/kernels/sub.cc
++++ b/tensorflow/lite/micro/kernels/sub.cc
+@@ -15,6 +15,8 @@ limitations under the License.
+
+ #include "tensorflow/lite/micro/kernels/sub.h"
+
++#include <limits>
++
+ #include "tensorflow/lite/c/builtin_op_data.h"
+ #include "tensorflow/lite/c/common.h"
+ #include "tensorflow/lite/kernels/internal/common.h"
+@@ -63,6 +65,30 @@ void EvalSub(TfLiteContext* context, TfLiteNode* node, TfLiteSubParams* params,
+   }
+ }
+
++void EvalSubInt32(const OpDataSub* data, const TfLiteEvalTensor* input1,
++                  const TfLiteEvalTensor* input2, TfLiteEvalTensor* output) {
++  tflite::ArithmeticParams op_params = {};
++  SetActivationParams(std::numeric_limits<int32_t>::lowest(),
++                      std::numeric_limits<int32_t>::max(), &op_params);
++  if (data->requires_broadcast) {
++    tflite::reference_ops::BroadcastSubSlow(
++        op_params, tflite::micro::GetTensorShape(input1),
++        tflite::micro::GetTensorData<int32_t>(input1),
++        tflite::micro::GetTensorShape(input2),
++        tflite::micro::GetTensorData<int32_t>(input2),
++        tflite::micro::GetTensorShape(output),
++        tflite::micro::GetTensorData<int32_t>(output));
++  } else {
++    tflite::reference_ops::SubWithActivation(
++        op_params, tflite::micro::GetTensorShape(input1),
++        tflite::micro::GetTensorData<int32_t>(input1),
++        tflite::micro::GetTensorShape(input2),
++        tflite::micro::GetTensorData<int32_t>(input2),
++        tflite::micro::GetTensorShape(output),
++        tflite::micro::GetTensorData<int32_t>(output));
++  }
++}
++
+ TfLiteStatus EvalSubQuantized(TfLiteContext* context, TfLiteNode* node,
+                               TfLiteSubParams* params, const OpDataSub* data,
+                               const TfLiteEvalTensor* input1,
+@@ -149,6 +175,8 @@ TfLiteStatus SubEval(TfLiteContext* context, TfLiteNode* node) {
+
+   if (output->type == kTfLiteFloat32) {
+     EvalSub(context, node, params, &data, input1, input2, output);
++  } else if (output->type == kTfLiteInt32) {
++    EvalSubInt32(&data, input1, input2, output);
+   } else if (output->type == kTfLiteInt8 || output->type == kTfLiteInt16) {
+     TF_LITE_ENSURE_OK(context, EvalSubQuantized(context, node, params, &data,
+                                                 input1, input2, output));
+diff --git a/tensorflow/lite/micro/kernels/sub_test.cc b/tensorflow/lite/micro/kernels/sub_test.cc
+index d5226ebc..d3c5a5d3 100644
+--- a/tensorflow/lite/micro/kernels/sub_test.cc
++++ b/tensorflow/lite/micro/kernels/sub_test.cc
+@@ -105,6 +105,24 @@ void TestSubFloat(int* input1_dims_data, const float* input1_data,
+                      ElementCount(*output_dims), activation);
+ }
+
++void TestSubInt32(int* input1_dims_data, const int32_t* input1_data,
++                  int* input2_dims_data, const int32_t* input2_data,
++                  int* output_dims_data, const int32_t* expected_output,
++                  int32_t* output_data) {
++  TfLiteIntArray* input1_dims = IntArrayFromInts(input1_dims_data);
++  TfLiteIntArray* input2_dims = IntArrayFromInts(input2_dims_data);
++  TfLiteIntArray* output_dims = IntArrayFromInts(output_dims_data);
++
++  TfLiteTensor tensors[] = {
++      CreateTensor(input1_data, input1_dims),
++      CreateTensor(input2_data, input2_dims),
++      CreateTensor(output_data, output_dims),
++  };
++
++  ValidateSubGoldens(tensors, 3, expected_output, output_data,
++                     ElementCount(*output_dims), kTfLiteActNone, 0.0f);
++}
++
+ template <typename T>
+ void TestSubQuantized(int* input1_dims_data, const float* input1_data,
+                       T* input1_quantized, float input1_scale,
+@@ -157,6 +175,31 @@ TF_LITE_MICRO_TEST(FloatSubNoActivation) {
+                                 kTfLiteActNone, output_data);
+ }
+
++TF_LITE_MICRO_TEST(Int32SubNoActivation) {
++  int inout_shape[] = {4, 1, 2, 2, 1};
++  const int32_t input1_values[] = {-20, 2, 7, 8};
++  const int32_t input2_values[] = {1, 2, 3, 5};
++  const int32_t golden_values[] = {-21, 0, 4, 3};
++  int32_t output_data[4];
++
++  tflite::testing::TestSubInt32(inout_shape, input1_values, inout_shape,
++                                input2_values, inout_shape, golden_values,
++                                output_data);
++}
++
++TF_LITE_MICRO_TEST(Int32SubBroadcast) {
++  int input1_shape[] = {4, 1, 2, 2, 1};
++  int input2_shape[] = {1, 1};
++  const int32_t input1_values[] = {-20, 2, 7, 8};
++  const int32_t input2_values[] = {3};
++  const int32_t golden_values[] = {-23, -1, 4, 5};
++  int32_t output_data[4];
++
++  tflite::testing::TestSubInt32(input1_shape, input1_values, input2_shape,
++                                input2_values, input1_shape, golden_values,
++                                output_data);
++}
++
+ TF_LITE_MICRO_TEST(FloatSubActivationRelu1) {
+   const int output_dims_count = 4;
+   int inout_shape[] = {4, 1, 2, 2, 1};

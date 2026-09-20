@@ -62,6 +62,7 @@ def read_until_prompt(
     timeout: float,
     command: bytes | None = None,
     log_file: BinaryIO | None = None,
+    echo_output: bool = True,
 ) -> bytes:
     deadline = time.monotonic() + timeout
     data = bytearray()
@@ -74,8 +75,9 @@ def read_until_prompt(
 
         if chunk:
             data.extend(chunk)
-            sys.stdout.buffer.write(chunk)
-            sys.stdout.buffer.flush()
+            if echo_output:
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
             if log_file is not None:
                 log_file.write(chunk)
                 log_file.flush()
@@ -119,9 +121,15 @@ def main() -> int:
                 transcript.extend(marker)
                 encoded = command.encode("ascii")
                 write_command(port, encoded + b"\r\n")
-                transcript.extend(
-                    read_until_prompt(port, args.timeout, encoded, log_file)
-                )
+                response = read_until_prompt(port, args.timeout, encoded, log_file)
+                transcript.extend(response)
+                echo = response.find(encoded)
+                if echo < 0 or response.find(b"nsh>", echo + len(encoded)) < 0:
+                    message = b"\nFAIL: command did not return to NSH before timeout\n"
+                    log_file.write(message)
+                    log_file.flush()
+                    sys.stderr.buffer.write(message)
+                    return 2
         finally:
             port.close()
 

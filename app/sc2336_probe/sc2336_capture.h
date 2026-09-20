@@ -37,6 +37,12 @@ int sc2336_raw10_bggr_letterbox(const uint8_t *raw, size_t raw_len,
                                 uint16_t rgb_w, uint16_t rgb_h,
                                 struct sc2336_rgb_capture_s *result);
 
+int sc2336_raw10_bggr_preview_rgb565(const uint8_t *raw, size_t raw_len,
+                                     uint16_t raw_w, uint16_t raw_h,
+                                     uint16_t *fb, size_t fb_len,
+                                     uint16_t fb_w, uint16_t fb_h,
+                                     uint16_t fb_stride);
+
 int sc2336_capture_rgb888_letterbox(uint8_t *rgb, size_t rgb_len,
                                     uint16_t rgb_w, uint16_t rgb_h,
                                     struct sc2336_rgb_capture_s *result);

@@ -26,6 +26,55 @@
 #include <netutils/ntpclient.h>
 
 #include "c6_mimo_tls.h"
+#include "c6_queue_service.h"
+#include "velafit_coach_service.h"
+int microsd_readonly_identify(void);
+int microsd_mount_readonly(void);
+int microsd_file_test(bool readback);
+#ifdef CONFIG_LVX_USE_DEMO_CONTEST2026_345_VELAFIT_AI
+int microsd_queue_test(bool readback);
+#endif
+#ifdef CONFIG_LVX_USE_DEMO_CONTEST2026_345_VELAFIT_AI
+#include "../velafit_ai/sync/velafit_cloud_agent.h"
+#include "../velafit_ai/sync/velafit_outbox.h"
+int microsd_cloud_queue_test(vf_outbox_sender sender, void *ctx, bool readback);
+int microsd_outbox_ack(const char *id);
+
+struct workout_transport_s
+{
+  const char *key;
+  struct c6_mimo_result_s *result;
+};
+
+static int workout_transport(void *opaque, const char *payload,
+                             char *content, size_t capacity)
+{
+  struct workout_transport_s *ctx = opaque;
+  int ret = c6_mimo_completion(ctx->key, payload, ctx->result);
+  if (ret != 0) return ret;
+  if (strlen(ctx->result->content) >= capacity) return -EOVERFLOW;
+  strcpy(content, ctx->result->content);
+  return 0;
+}
+
+static int workout_queue_sender(void *opaque, const char *summary)
+{
+  velafit_mimo_prescription_t advice;
+  int ret = velafit_cloud_agent_submit_workout_via(summary, &advice,
+                                                 workout_transport, opaque);
+  if (ret == 0)
+    printf("Workout queue schema PASS session=%s score=%lu playback=disabled\n",
+           advice.session_id, (unsigned long)advice.score_overall);
+  return ret;
+}
+#endif
+#ifdef CONFIG_LVX_USE_DEMO_CONTEST2026_345_VELAFIT_AI
+#include "../velafit_ai/algo/velafit_voice_command.h"
+#endif
+#ifdef CONFIG_LVX_USE_DEMO_CONTEST2026_345_ES8311_AUDIO
+#include "../es8311_audio/velafit_mic_capture.h"
+#include "../es8311_audio/velafit_pcm_stream.h"
+#endif
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -47,6 +96,53 @@ static void c6_wifi_secure_zero(FAR void *buffer, size_t size)
       *cursor++ = 0;
     }
 }
+
+#ifdef CONFIG_LVX_USE_DEMO_CONTEST2026_345_ES8311_AUDIO
+static int c6_wifi_tts_pcm(FAR void *arg, FAR const uint8_t *pcm,
+                           size_t bytes)
+{
+  return velafit_pcm_stream_write((FAR struct velafit_pcm_stream_s *)arg,
+                                  pcm, bytes);
+}
+
+static int c6_wifi_tts_test(FAR const char *api_key)
+{
+  static const char text[] =
+    "训练完成，请注意保持膝盖与脚尖方向一致，稍作休息后再继续。";
+  struct velafit_pcm_stream_s *player = NULL;
+  struct velafit_pcm_stream_stats_s playback = {0};
+  struct c6_mimo_tts_result_s tts = {0};
+  int ret;
+
+  printf("[TTS-TEST] START source=MiMo text_bytes=%lu file_output=disabled\n",
+         (unsigned long)strlen(text));
+  ret = velafit_pcm_stream_start(&player, 24000);
+  if (ret < 0)
+    {
+      printf("[TTS-TEST] audio start FAIL ret=%d\n", ret);
+      return ret;
+    }
+
+  ret = c6_mimo_tts_stream(api_key, text, "mimo_default",
+                           c6_wifi_tts_pcm, player, &tts);
+  if (ret < 0)
+    {
+      velafit_pcm_stream_abort(player);
+      printf("[TTS-TEST] FAIL phase=cloud ret=%d http=%d\n",
+             ret, tts.http_status);
+      return ret;
+    }
+
+  ret = velafit_pcm_stream_finish(player, &playback);
+  printf("[TTS-TEST] %s http=%d first_pcm_ms=%lu request_ms=%lu "
+         "pcm_bytes=%lu played_frames=%lu underflows=%u\n",
+         ret == 0 ? "PLAYBACK_DONE" : "FAIL", tts.http_status,
+         tts.first_pcm_ms, tts.elapsed_ms,
+         (unsigned long)tts.pcm_bytes,
+         (unsigned long)playback.played_frames, playback.underflows);
+  return ret;
+}
+#endif
 
 static int c6_wifi_read_line(FAR const char *prompt, FAR char *buffer,
                              size_t size, bool secret)
@@ -218,12 +314,83 @@ int main(int argc, FAR char *argv[])
   FAR const char *ifname;
   int ret;
 
+  /* Isolated storage diagnostic: never initialize the C6 transport. */
+
+  if (argc == 2 && strcmp(argv[1], "demo-config") == 0)
+    {
+      ret = c6_wifi_read_line("Wi-Fi SSID: ", ssid, sizeof(ssid), false);
+      if (ret == 0)
+        ret = c6_wifi_read_line("Wi-Fi password (hidden): ", password,
+                                sizeof(password), true);
+      if (ret == 0)
+        ret = c6_wifi_read_line("MiMo API key (hidden): ", api_key,
+                                sizeof(api_key), true);
+      if (ret == 0)
+        ret = velafit_coach_runtime_configure(ssid, password, api_key);
+      c6_wifi_secure_zero(password, sizeof(password));
+      c6_wifi_secure_zero(api_key, sizeof(api_key));
+      printf("[VELAFIT] DEMO_CONFIG %s network_started=no\n",
+             ret == 0 ? "PASS" : "FAIL");
+      return ret < 0 ? 1 : 0;
+    }
+
+  if (argc == 2 && strcmp(argv[1], "queue-status") == 0)
+    return c6_queue_status() < 0 ? 1 : 0;
+  if (argc == 2 && strcmp(argv[1], "queue-stop") == 0)
+    return c6_queue_stop() < 0 ? 1 : 0;
+  if (argc == 3 && strcmp(argv[1], "queue-add") == 0)
+    {
+      char summary[256];
+      /* This CLI deliberately creates a fixed summary, not a real workout. */
+      if (strlen(argv[2]) > 31 || strspn(argv[2],
+          "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != strlen(argv[2]))
+        return 1;
+      snprintf(summary, sizeof(summary), "{\"session_id\":\"%s\",\"exercise\":\"squat\",\"reps\":10,\"source\":\"fixed-test-summary\"}", argv[2]);
+      ret = c6_queue_submit(argv[2], summary);
+      printf("OUTBOX enqueue ret=%d receipt=RAM-only source=fixed-summary\n", ret);
+      return ret < 0 ? 1 : 0;
+    }
+  if (argc == 2 && strcmp(argv[1], "sd-file-write") == 0)
+    {
+      return microsd_file_test(false) < 0 ? 1 : 0;
+    }
+#ifdef CONFIG_LVX_USE_DEMO_CONTEST2026_345_VELAFIT_AI
+  if (argc==2 && strcmp(argv[1],"sd-queue-test")==0)
+    return microsd_queue_test(false)<0?1:0;
+  if (argc==2 && strcmp(argv[1],"sd-queue-replay")==0)
+    return microsd_queue_test(true)<0?1:0;
+  if (argc==2 && strcmp(argv[1],"sd-cloud-replay")==0)
+    return microsd_cloud_queue_test(NULL, NULL, true)<0?1:0;
+  if (argc==3 && strcmp(argv[1],"sd-outbox-ack")==0)
+    return microsd_outbox_ack(argv[2])<0?1:0;
+#endif
+  if (argc == 2 && strcmp(argv[1], "sd-file-readback") == 0)
+    {
+      return microsd_file_test(true) < 0 ? 1 : 0;
+    }
+  if (argc == 2 && strcmp(argv[1], "sd-mount-ro") == 0)
+    {
+      return microsd_mount_readonly() < 0 ? 1 : 0;
+    }
+  if (argc == 2 && strcmp(argv[1], "sd-identify") == 0)
+    {
+      return microsd_readonly_identify() < 0 ? 1 : 0;
+    }
+
   if (!((argc == 2 &&
          (strcmp(argv[1], "probe") == 0 ||
           strcmp(argv[1], "version") == 0 ||
           strcmp(argv[1], "connect") == 0 ||
           strcmp(argv[1], "tls") == 0 ||
-          strcmp(argv[1], "mimo") == 0)) ||
+          strcmp(argv[1], "mimo") == 0 ||
+          strcmp(argv[1], "demo-config") == 0 ||
+          strcmp(argv[1], "tts") == 0 ||
+          strcmp(argv[1], "coach-test") == 0 ||
+          strcmp(argv[1], "workout") == 0 ||
+          strcmp(argv[1], "queue-workout") == 0 ||
+          strcmp(argv[1], "queue-start") == 0 ||
+          strcmp(argv[1], "asr") == 0 ||
+          strcmp(argv[1], "asr-fixture") == 0)) ||
         (argc == 3 && strcmp(argv[1], "tls") == 0) ||
         (argc == 4 &&
          (strcmp(argv[1], "connect") == 0 ||
@@ -232,7 +399,9 @@ int main(int argc, FAR char *argv[])
       fprintf(stderr,
               "Usage: c6_wifi {probe|version|connect "
               "[<ssid> <password>]|tcp <host> <port>|"
-              "tls [<verify-host>]|mimo}\n");
+              "tls [<verify-host>]|mimo|workout|queue-workout|queue-start|"
+              "queue-status|queue-stop|queue-add <id>|asr|asr-fixture|tts|"
+              "coach-test|demo-config}\n");
       return 1;
     }
 
@@ -267,7 +436,12 @@ int main(int argc, FAR char *argv[])
       return ret == OK ? 0 : 1;
     }
 
-  if (strcmp(argv[1], "mimo") == 0)
+  if (strcmp(argv[1], "mimo") == 0 || strcmp(argv[1], "workout") == 0 ||
+      strcmp(argv[1], "tts") == 0 ||
+      strcmp(argv[1], "coach-test") == 0 ||
+      strcmp(argv[1], "queue-workout") == 0 || strcmp(argv[1], "asr") == 0 ||
+      strcmp(argv[1], "queue-start") == 0 ||
+      strcmp(argv[1], "asr-fixture") == 0)
     {
       ret = c6_wifi_sync_time();
       if (ret < 0)
@@ -289,7 +463,114 @@ int main(int argc, FAR char *argv[])
           return 1;
         }
 
-      ret = c6_mimo_chat(api_key, &mimo_result);
+      memset(&mimo_result, 0, sizeof(mimo_result));
+      if (strcmp(argv[1], "coach-test") == 0)
+        {
+          const struct velafit_workout_summary_s summary =
+          {
+            .target_reps = 20,
+            .completed_reps = 20,
+            .form_warning_reps = 2,
+            .shallow_warning_reps = 1,
+            .knee_caving_warning_reps = 1,
+            .trunk_lean_warning_reps = 0,
+            .duration_sec = 48,
+            .body_lost_count = 1
+          };
+          struct velafit_coach_result_s coach;
+          ret = velafit_coach_runtime_set_key(api_key);
+          if (ret < 0)
+            {
+              c6_wifi_secure_zero(api_key, sizeof(api_key));
+              return 1;
+            }
+          printf("[COACH-TEST] source=fixed-debug-summary target=20 completed=20 form_warnings=2 duration_sec=48\n");
+          ret = velafit_coach_run(api_key, &summary, &coach);
+          c6_wifi_secure_zero(api_key, sizeof(api_key));
+          printf("[COACH-TEST] %s advice_http=%d advice_ms=%lu advice_bytes=%lu tts_first_pcm_ms=%lu pcm_bytes=%lu\n",
+                 ret == 0 ? "PASS" : "FAIL", coach.http_status,
+                 coach.advice_latency_ms, (unsigned long)coach.advice_bytes,
+                 coach.tts_first_pcm_ms, (unsigned long)coach.pcm_bytes);
+          return ret < 0 ? 1 : 0;
+        }
+      if (strcmp(argv[1], "tts") == 0)
+        {
+#ifdef CONFIG_LVX_USE_DEMO_CONTEST2026_345_ES8311_AUDIO
+          ret = c6_wifi_tts_test(api_key);
+#else
+          ret = -ENOSYS;
+#endif
+          c6_wifi_secure_zero(api_key, sizeof(api_key));
+          return ret < 0 ? 1 : 0;
+        }
+      if (strcmp(argv[1], "queue-start") == 0)
+        {
+          ret = c6_queue_start(api_key);
+          c6_wifi_secure_zero(api_key, sizeof(api_key));
+          return ret < 0 ? 1 : 0;
+        }
+      if (strcmp(argv[1], "mimo") == 0)
+        ret = c6_mimo_chat(api_key, &mimo_result);
+      else if (strcmp(argv[1], "queue-workout") == 0)
+        {
+#ifdef CONFIG_LVX_USE_DEMO_CONTEST2026_345_VELAFIT_AI
+          struct workout_transport_s ctx = {api_key, &mimo_result};
+          ret = microsd_cloud_queue_test(workout_queue_sender, &ctx, false);
+#else
+          ret = -ENOSYS;
+#endif
+        }
+      else if (strcmp(argv[1], "workout") == 0)
+        {
+#ifdef CONFIG_LVX_USE_DEMO_CONTEST2026_345_VELAFIT_AI
+          struct workout_transport_s ctx = {api_key, &mimo_result};
+          velafit_mimo_prescription_t advice;
+          ret = velafit_cloud_agent_submit_workout_via(
+              "{\"session_id\":\"VF-FIXED-001\",\"exercise\":\"squat\","
+              "\"reps\":10,\"source\":\"fixed-test-summary\"}",
+              &advice, workout_transport, &ctx);
+          if (ret == 0)
+            printf("Workout schema PASS session=%s score=%lu playback=disabled source=fixed-summary\n",
+                   advice.session_id, (unsigned long)advice.score_overall);
+          else if (mimo_result.http_status == 200)
+            printf("Workout fixed-fixture schema rejected content: %s\n", mimo_result.content);
+#else
+          ret = -ENOSYS;
+#endif
+        }
+      else
+        {
+#ifdef CONFIG_LVX_USE_DEMO_CONTEST2026_345_ES8311_AUDIO
+          size_t frames = 0;
+          int16_t *recorded = NULL;
+          const int16_t *samples;
+          if (strcmp(argv[1], "asr-fixture") == 0)
+            {
+              samples = velafit_audio_fixture(&frames);
+              ret = samples ? 0 : -ENOENT;
+              printf("ASR source=synthetic-fixture execution=P4 model=mimo-v2.5-asr\n");
+            }
+          else
+            {
+              frames = 5 * 44100;
+              recorded = malloc(frames * sizeof(*recorded));
+              samples = recorded;
+              printf("ASR source=microphone execution=P4 model=mimo-v2.5-asr\n"
+                     "ASR RECORD NOW: 5 seconds after 1 second settling; cloud upload follows\n");
+              fflush(stdout);
+              ret = recorded ? velafit_mic_capture_pcm(recorded, 5) : -ENOMEM;
+            }
+          if (ret == 0)
+            ret = c6_mimo_asr(api_key, samples, frames, 44100, &mimo_result);
+          if (recorded)
+            {
+              c6_wifi_secure_zero(recorded, frames * sizeof(*recorded));
+              free(recorded);
+            }
+#else
+          ret = -ENOSYS;
+#endif
+        }
       c6_wifi_secure_zero(api_key, sizeof(api_key));
       if (ret < 0)
         {
@@ -304,6 +585,11 @@ int main(int argc, FAR char *argv[])
              (unsigned long)mimo_result.reasoning_chars,
              mimo_result.response_id);
       printf("MiMo response: %s\n", mimo_result.content);
+#ifdef CONFIG_LVX_USE_DEMO_CONTEST2026_345_VELAFIT_AI
+      if (strcmp(argv[1], "asr") == 0 || strcmp(argv[1], "asr-fixture") == 0)
+        printf("ASR command_class=%d (0=unknown,1=wake,2=start,3=pause,4=resume,5=stop); dispatch=not-connected\n",
+               (int)velafit_voice_parse(mimo_result.content));
+#endif
       return 0;
     }
 

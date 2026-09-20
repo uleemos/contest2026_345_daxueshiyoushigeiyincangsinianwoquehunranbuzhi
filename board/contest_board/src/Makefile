@@ -28,6 +28,10 @@ ifeq ($(CONFIG_INPUT_TOUCHSCREEN),y)
 CSRCS += board_touch.c
 endif
 
+ifeq ($(CONFIG_ESP32P4_MIPI_DSI),y)
+CSRCS += board_display.c
+endif
+
 ifeq ($(CONFIG_ESP32P4_SDMMC),y)
 CSRCS += board_sdmmc.c
 endif

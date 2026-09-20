@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import ssl
 import sys
 import time
+import wave
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -64,6 +66,8 @@ def main() -> int:
     parser.add_argument("--env-file", default=DEFAULT_ENV)
     parser.add_argument("--output")
     parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument("--audio-wav", type=Path,
+                        help="Transcribe a real WAV recording using MiMo ASR")
     args = parser.parse_args()
 
     env_path = Path(args.env_file)
@@ -99,6 +103,24 @@ def main() -> int:
         "max_completion_tokens": 512,
     }
     encoded = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
+    model = "mimo-v2.5"
+    if args.audio_wav:
+        model = "mimo-v2.5-asr"
+        if args.audio_wav.stat().st_size > 7_000_000:
+            parser.error("WAV too large for this smoke test")
+        with wave.open(str(args.audio_wav), "rb") as wav:
+            if wav.getnframes() == 0 or wav.getsampwidth() != 2:
+                parser.error("expected nonempty PCM16 WAV")
+        request_body = {
+            "model": model,
+            "messages": [{"role": "user", "content": [{
+                "type": "input_audio",
+                "input_audio": {"data": "data:audio/wav;base64," +
+                    base64.b64encode(args.audio_wav.read_bytes()).decode("ascii")},
+            }]}],
+            "asr_options": {"language": "auto"},
+        }
+        encoded = json.dumps(request_body).encode("utf-8")
     request = urllib.request.Request(
         endpoint,
         data=encoded,
@@ -132,7 +154,7 @@ def main() -> int:
         result = {
             "test_time": started_at,
             "execution_location": "computer",
-            "model": "mimo-v2.5",
+            "model": model,
             "endpoint": endpoint,
             "auth": "api-key (value redacted)",
             "http_status": exc.code,
@@ -148,7 +170,7 @@ def main() -> int:
         result = {
             "test_time": started_at,
             "execution_location": "computer",
-            "model": "mimo-v2.5",
+            "model": model,
             "endpoint": endpoint,
             "auth": "api-key (value redacted)",
             "http_status": None,
@@ -182,7 +204,7 @@ def main() -> int:
     result = {
         "test_time": started_at,
         "execution_location": "computer",
-        "model": "mimo-v2.5",
+        "model": model,
         "endpoint": endpoint,
         "auth": "api-key (value redacted)",
         "tls_verification": "system CA and hostname verification enabled",
@@ -193,6 +215,8 @@ def main() -> int:
         "reasoning_chars": reasoning_chars,
         "response_preview": redact(content, api_key)[:300],
         "result": result_name,
+        "acceptance_scope": "nonempty transcription; phrase accuracy requires review"
+                            if args.audio_wav else "text API smoke",
     }
     rendered = json.dumps(result, ensure_ascii=False, indent=2)
     print(rendered)

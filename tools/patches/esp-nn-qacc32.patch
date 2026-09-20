@@ -1,0 +1,8 @@
+--- a/esp_nn_conv_riscv_pie.c
++++ b/esp_nn_conv_riscv_pie.c
+@@ -153,1 +153,1 @@
+-    int8_t transposed[16 * 16] __attribute__((aligned(16)));  /* in_ch <= 16 for this path */
++    int8_t transposed[16 * 32] __attribute__((aligned(16)));  /* VelaFit bounded QACC path: in_ch <= 32 */
+@@ -262,1 +262,1 @@
+-    if (in_channels < 16) {
++    if (in_channels <= 32) {

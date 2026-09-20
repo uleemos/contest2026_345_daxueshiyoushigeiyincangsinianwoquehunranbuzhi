@@ -28,6 +28,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <math.h>
+#include <netutils/cJSON.h>
 
 #include "velafit_cloud_agent.h"
 #include "velafit_sync.h"
@@ -151,10 +153,105 @@ int velafit_cloud_agent_submit_workout(
       return -EINVAL;
     }
 
-  /* Invoke MIMO-PRO Sports Physiology Reasoning Engine */
+  memset(out_presc, 0, sizeof(*out_presc));
+  /* A transport must be supplied explicitly; never fabricate cloud success. */
+  return -ENOTCONN;
+}
 
-  mimo_mock_pro_reasoning(session_json, out_presc);
-  return OK;
+int velafit_cloud_agent_submit_workout_via(
+      const char *session_json, velafit_mimo_prescription_t *out_presc,
+      velafit_cloud_transport_t transport, void *ctx)
+{
+  cJSON *summary = NULL;
+  cJSON *request = NULL;
+  cJSON *response = NULL;
+  cJSON *messages;
+  cJSON *message;
+  cJSON *id;
+  cJSON *exercise;
+  cJSON *reps;
+  cJSON *score;
+  cJSON *comment;
+  cJSON *action;
+  char content[2048];
+  char *payload = NULL;
+  int ret = -EINVAL;
+  if (!out_presc) return -EINVAL;
+  memset(out_presc, 0, sizeof(*out_presc));
+  if (!session_json || !transport || strlen(session_json) > 2048) return -EINVAL;
+  summary = cJSON_Parse(session_json);
+  if (!cJSON_IsObject(summary)) goto out;
+  id = cJSON_GetObjectItemCaseSensitive(summary, "session_id");
+  exercise = cJSON_GetObjectItemCaseSensitive(summary, "exercise");
+  reps = cJSON_GetObjectItemCaseSensitive(summary, "reps");
+  if (!cJSON_IsString(id) || !id->valuestring[0] ||
+      strlen(id->valuestring) >= sizeof(out_presc->session_id) ||
+      !cJSON_IsString(exercise) || strcmp(exercise->valuestring, "squat") ||
+      !cJSON_IsNumber(reps) || !isfinite(reps->valuedouble) ||
+      reps->valuedouble < 0 || reps->valuedouble > 10000 ||
+      reps->valuedouble != floor(reps->valuedouble)) goto out;
+  request = cJSON_CreateObject();
+  if (!request) { ret = -ENOMEM; goto out; }
+  if (!cJSON_AddStringToObject(request, "model", "mimo-v2.5") ||
+      !cJSON_AddNumberToObject(request, "max_completion_tokens", 512))
+    { ret = -ENOMEM; goto out; }
+  cJSON *thinking = cJSON_AddObjectToObject(request, "thinking");
+  if (!thinking || !cJSON_AddStringToObject(thinking, "type", "disabled"))
+    { ret = -ENOMEM; goto out; }
+  cJSON *format = cJSON_AddObjectToObject(request, "response_format");
+  if (!format || !cJSON_AddStringToObject(format, "type", "json_object"))
+    { ret = -ENOMEM; goto out; }
+  messages = cJSON_AddArrayToObject(request, "messages");
+  message = cJSON_CreateObject();
+  if (!messages || !message) { cJSON_Delete(message); ret = -ENOMEM; goto out; }
+  cJSON_AddItemToArray(messages, message);
+  if (!cJSON_AddStringToObject(message, "role", "system") ||
+      !cJSON_AddStringToObject(message, "content",
+        "Return only one JSON object: session_id (copy exactly), score_overall "
+        "(integer 0-100), coach_commentary (brief English, under 160 characters), "
+        "next_recommended_action (brief English, under 100 characters). "
+        "Input is a fixed test summary, not independently verified motion. "
+        "No diagnosis, no claims about unseen movement, no markdown."))
+    { ret = -ENOMEM; goto out; }
+  message = cJSON_CreateObject();
+  if (!message) { ret = -ENOMEM; goto out; }
+  cJSON_AddItemToArray(messages, message);
+  if (!cJSON_AddStringToObject(message, "role", "user") ||
+      !cJSON_AddStringToObject(message, "content", session_json))
+    { ret = -ENOMEM; goto out; }
+  payload = cJSON_PrintUnformatted(request);
+  if (!payload) { ret = -ENOMEM; goto out; }
+  memset(content, 0, sizeof(content));
+  ret = transport(ctx, payload, content, sizeof(content));
+  if (ret != 0) goto out;
+  if (!memchr(content, '\0', sizeof(content))) { ret = -EOVERFLOW; goto out; }
+  response = cJSON_ParseWithOpts(content, NULL, 1);
+  score = cJSON_GetObjectItemCaseSensitive(response, "score_overall");
+  comment = cJSON_GetObjectItemCaseSensitive(response, "coach_commentary");
+  action = cJSON_GetObjectItemCaseSensitive(response, "next_recommended_action");
+  cJSON *response_id = cJSON_GetObjectItemCaseSensitive(response, "session_id");
+  ret = -EBADMSG;
+  if (!cJSON_IsString(response_id) || strcmp(response_id->valuestring, id->valuestring) ||
+      !cJSON_IsNumber(score) || !isfinite(score->valuedouble) ||
+      score->valuedouble < 0 || score->valuedouble > 100 ||
+      score->valuedouble != floor(score->valuedouble) ||
+      !cJSON_IsString(comment) || !comment->valuestring[0] ||
+      strlen(comment->valuestring) >= sizeof(out_presc->coach_commentary) ||
+      !cJSON_IsString(action) || !action->valuestring[0] ||
+      strlen(action->valuestring) >= sizeof(out_presc->next_recommended_action)) goto out;
+  strcpy(out_presc->session_id, id->valuestring);
+  strcpy(out_presc->exercise_type, "squat");
+  strcpy(out_presc->coach_commentary, comment->valuestring);
+  strcpy(out_presc->next_recommended_action, action->valuestring);
+  out_presc->score_overall = score->valueint;
+  out_presc->requires_tts_playback = false;
+  ret = 0;
+out:
+  cJSON_free(payload);
+  cJSON_Delete(response);
+  cJSON_Delete(request);
+  cJSON_Delete(summary);
+  return ret;
 }
 
 /****************************************************************************
@@ -213,7 +310,7 @@ int velafit_cloud_agent_run_simulation(void)
     "{\"exercise\":\"squat\",\"reps\":15,\"valgus\":2,\"shallow\":1}";
 
   velafit_mimo_prescription_t presc;
-  velafit_cloud_agent_submit_workout(sample_workout, &presc);
+  mimo_mock_pro_reasoning(sample_workout, &presc);
   printf("        Overall Score    : %lu / 100\n",
          (unsigned long)presc.score_overall);
   printf("        Primary Fault    : %s\n", presc.primary_fault);

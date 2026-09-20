@@ -569,6 +569,12 @@ void velafit_draw_string(velafit_canvas_t *canvas,
                          velafit_color_t bg,
                          int scale)
 {
+  size_t length;
+  int source_width;
+  int source_height;
+  int rotated_x;
+  int rotated_y;
+
   if (str == NULL)
     {
       return;
@@ -579,18 +585,88 @@ void velafit_draw_string(velafit_canvas_t *canvas,
       scale = 1;
     }
 
-  int cur_x = x;
-  while (*str != '\0')
+  length = strlen(str);
+  if (length == 0)
     {
-      velafit_draw_char(canvas, cur_x, y, *str, fg, bg, scale);
-      cur_x += (5 + 1) * scale;
-      str++;
+      return;
     }
+
+  /* The product LCD is physically mounted 90 degrees clockwise relative to
+   * framebuffer coordinates. Rotate every text raster CCW90 around the
+   * caller's original text-box center. Camera pixels and model coordinates
+   * remain unchanged. */
+
+  source_width = (int)(length * 6 - 1) * scale;
+  source_height = 7 * scale;
+  rotated_x = x + (source_width - source_height) / 2;
+  rotated_y = y + (source_height - source_width) / 2;
+  if (rotated_x < 2) rotated_x = 2;
+  if (rotated_y < 2) rotated_y = 2;
+  if (canvas != NULL)
+    {
+      if (rotated_x + source_height > (int)canvas->width - 2)
+        rotated_x = (int)canvas->width - source_height - 2;
+      if (rotated_y + source_width > (int)canvas->height - 2)
+        rotated_y = (int)canvas->height - source_width - 2;
+      if (rotated_x < 2) rotated_x = 2;
+      if (rotated_y < 2) rotated_y = 2;
+    }
+
+  for (size_t index = 0; index < length; index++)
+    {
+      unsigned char c = (unsigned char)str[index];
+      int font_idx;
+      if (c < 32 || c > 126) c = '?';
+      font_idx = c - 32;
+      for (int col = 0; col < 5; col++)
+        {
+          uint8_t bits = g_font5x7[font_idx][col];
+          for (int row = 0; row < 7; row++)
+            {
+              if ((bits & (1 << row)) == 0) continue;
+              for (int sx = 0; sx < scale; sx++)
+                for (int sy = 0; sy < scale; sy++)
+                  {
+                    int source_x = ((int)index * 6 + col) * scale + sx;
+                    int source_y = row * scale + sy;
+                    velafit_draw_pixel(canvas,
+                                       rotated_x + source_y,
+                                       rotated_y + source_width - 1 - source_x,
+                                       fg);
+                  }
+            }
+        }
+    }
+
+  (void)bg;
 }
 
 /****************************************************************************
  * Name: velafit_render_skeleton
  ****************************************************************************/
+
+#include "../../sc2336_probe/sc2336_transform.h"
+
+void velafit_render_sc2336_skeleton(velafit_canvas_t *canvas,
+                                   const pose_frame_t *model_pose,
+                                   uint16_t raw_w,uint16_t raw_h,
+                                   uint32_t quality_flags)
+{
+  if (!canvas || !model_pose || !canvas->width || !canvas->height ||
+      canvas->width>UINT16_MAX || canvas->height>UINT16_MAX) return;
+  pose_frame_t display=*model_pose;
+  for(unsigned i=0;i<VELAFIT_NUM_KEYPOINTS;i++)
+    {
+      float x,y;
+      if(!isfinite(display.kpts[i].score) ||
+         !sc2336_model_to_display(raw_w,raw_h,192,192,
+            canvas->width,canvas->height,display.kpts[i].x,display.kpts[i].y,&x,&y))
+        {display.kpts[i].x=display.kpts[i].y=0;display.kpts[i].score=0;}
+      else
+        {display.kpts[i].x=x/canvas->width;display.kpts[i].y=y/canvas->height;}
+    }
+  velafit_render_skeleton(canvas,&display,quality_flags);
+}
 
 void velafit_render_skeleton(velafit_canvas_t *canvas,
                              const pose_frame_t *pose,
@@ -900,6 +976,26 @@ void velafit_render_hud(velafit_canvas_t *canvas,
 /****************************************************************************
  * Name: velafit_render_dashboard
  ****************************************************************************/
+
+void velafit_render_session_status(velafit_canvas_t *canvas,
+                                   const char *state, uint32_t seconds,
+                                   bool awake, bool online)
+{
+  if (!canvas || !canvas->buffer || canvas->width < 16 || canvas->height < 80)
+    return;
+  char line[96];
+  snprintf(line,sizeof(line),"%s %lu:%02lu WAKE:%s NET:%s",
+           state ? state : "IDLE", (unsigned long)(seconds/60),
+           (unsigned long)(seconds%60), awake ? "YES":"NO",
+           online ? "ON":"OFF");
+  /* Existing bitmap glyphs advance six pixels. Clip at whole glyphs,
+   * reserve a separate status row below the count banner. */
+  size_t columns=(canvas->width-16)/6;
+  if (columns<sizeof(line)) line[columns]=0;
+  velafit_draw_rect_filled(canvas,0,24,canvas->width,16,VELAFIT_COLOR_DARKGRAY);
+  velafit_draw_string(canvas,8,28,line,VELAFIT_COLOR_WHITE,
+                      VELAFIT_COLOR_DARKGRAY,1);
+}
 
 void velafit_render_dashboard(velafit_canvas_t *canvas,
                               const pose_frame_t *pose,

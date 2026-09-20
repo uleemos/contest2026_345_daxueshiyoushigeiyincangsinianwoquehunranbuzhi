@@ -56,7 +56,7 @@ contest2026_345_daxueshiyoushigeiyincangsinianwoquehunranbuzhi/
 ### 3. 真机烧录与测试
 通过串口或 Windows esptool 烧录：
 ```bash
-python -m esptool --chip esp32p4 -b 921600 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_freq 80m --flash_size 16MB 0x0 nuttx.bin
+python -m esptool --chip esp32p4 -b 921600 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_freq 80m --flash_size 16MB 0x2000 nuttx.bin
 ```
 
 ---

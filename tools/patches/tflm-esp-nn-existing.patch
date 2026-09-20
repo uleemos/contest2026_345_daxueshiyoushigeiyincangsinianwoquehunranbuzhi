@@ -1,0 +1,339 @@
+diff --git a/tensorflow/lite/micro/kernels/conv.cc b/tensorflow/lite/micro/kernels/conv.cc
+index 5e2996c9..371b5fb9 100644
+--- a/tensorflow/lite/micro/kernels/conv.cc
++++ b/tensorflow/lite/micro/kernels/conv.cc
+@@ -25,6 +25,10 @@ limitations under the License.
+ #include "tensorflow/lite/micro/micro_log.h"
+ #include "tensorflow/lite/micro/micro_utils.h"
+
++#ifdef CONFIG_TFLITEMICRO_ESP_NN
++#  include <esp_nn.h>
++#endif
++
+ namespace tflite {
+ namespace {
+
+@@ -142,6 +146,70 @@ TfLiteStatus ConvCompile(TfLiteContext* context, TfLiteNode* node,
+ }
+ #endif // TFLITE_MODEL_COMPILER
+
++#ifdef CONFIG_TFLITEMICRO_ESP_NN
++void ConvEvalEspNn(TfLiteContext* context, const TfLiteConvParams& params,
++                   const OpDataConv& data, const TfLiteEvalTensor* input,
++                   const TfLiteEvalTensor* filter,
++                   const TfLiteEvalTensor* bias, TfLiteEvalTensor* output)
++{
++  const RuntimeShape input_shape = tflite::micro::GetTensorShape(input);
++  const RuntimeShape filter_shape = tflite::micro::GetTensorShape(filter);
++  const RuntimeShape output_shape = tflite::micro::GetTensorShape(output);
++  const int input_height = input_shape.Dims(1);
++  const int input_width = input_shape.Dims(2);
++  const int input_depth = input_shape.Dims(3);
++  const int output_height = output_shape.Dims(1);
++  const int output_width = output_shape.Dims(2);
++  const int output_depth = output_shape.Dims(3);
++  const int batch_size = MatchingDim(input_shape, 0, output_shape, 0);
++
++  const data_dims_t input_dims =
++    {
++      input_width, input_height, input_depth, 1
++    };
++  const data_dims_t filter_dims =
++    {
++      filter_shape.Dims(2), filter_shape.Dims(1),
++      filter_shape.Dims(3), 0
++    };
++  const data_dims_t output_dims =
++    {
++      output_width, output_height, output_depth, 1
++    };
++  const conv_params_t conv_params =
++    {
++      -data.input_zero_point, data.output_zero_point,
++      {params.stride_width, params.stride_height},
++      {data.padding.width, data.padding.height},
++      {0, 0}, {data.output_activation_min, data.output_activation_max}
++    };
++  const quant_data_t quant_data =
++    {
++      data.per_channel_output_shift, data.per_channel_output_multiplier
++    };
++  void* scratch = data.esp_nn_scratch_buffer_index < 0 ? nullptr :
++                  context->GetScratchBuffer(
++                  context, data.esp_nn_scratch_buffer_index);
++
++
++  esp_nn_set_conv_scratch_buf(scratch);
++  const int input_size = input_width * input_height * input_depth;
++  const int output_size = output_width * output_height * output_depth;
++  const int8_t* input_data = tflite::micro::GetTensorData<int8_t>(input);
++  int8_t* output_data = tflite::micro::GetTensorData<int8_t>(output);
++
++  for (int batch = 0; batch < batch_size; batch++)
++    {
++      esp_nn_conv_s8(
++        &input_dims, input_data + batch * input_size,
++        &filter_dims, tflite::micro::GetTensorData<int8_t>(filter),
++        tflite::micro::GetOptionalTensorData<int32_t>(bias),
++        &output_dims, output_data + batch * output_size,
++        &conv_params, &quant_data);
++    }
++}
++#endif
++
+ TfLiteStatus ConvEval(TfLiteContext* context, TfLiteNode* node) {
+   const TfLiteEvalTensor* input =
+       tflite::micro::GetEvalInput(context, node, kConvInputTensor);
+@@ -228,6 +296,15 @@ TfLiteStatus ConvEval(TfLiteContext* context, TfLiteNode* node) {
+           break;
+         }
+         case kTfLiteInt8: {
++#ifdef CONFIG_TFLITEMICRO_ESP_NN
++          if (params.dilation_width_factor == 1 &&
++              params.dilation_height_factor == 1)
++            {
++              ConvEvalEspNn(context, params, data, input, filter, bias,
++                            output);
++              break;
++            }
++#endif
+           reference_integer_ops::ConvPerChannel(
+               ConvParamsQuantized(params, data),
+               data.per_channel_output_multiplier, data.per_channel_output_shift,
+diff --git a/tensorflow/lite/micro/kernels/conv.h b/tensorflow/lite/micro/kernels/conv.h
+index a85ad7a4..3141886a 100644
+--- a/tensorflow/lite/micro/kernels/conv.h
++++ b/tensorflow/lite/micro/kernels/conv.h
+@@ -49,6 +49,12 @@ struct OpDataConv {
+   // A buffer used to store unpacked filter values. This is used if the source
+   // tensor is of n-bit precision that cannot be easily processed by kernels.
+   int filter_buffer_index;
++
++#ifdef CONFIG_TFLITEMICRO_ESP_NN
++  /* ESP-NN uses a per-node arena scratch buffer selected before Invoke. */
++
++  int esp_nn_scratch_buffer_index;
++#endif
+ };
+
+ extern const int kConvInputTensor;
+diff --git a/tensorflow/lite/micro/kernels/conv_common.cc b/tensorflow/lite/micro/kernels/conv_common.cc
+index 51c7a6ff..d97dcb78 100644
+--- a/tensorflow/lite/micro/kernels/conv_common.cc
++++ b/tensorflow/lite/micro/kernels/conv_common.cc
+@@ -21,6 +21,10 @@ limitations under the License.
+ #include "tensorflow/lite/micro/kernels/conv.h"
+ #include "tensorflow/lite/micro/kernels/kernel_util.h"
+
++#ifdef CONFIG_TFLITEMICRO_ESP_NN
++#  include <esp_nn.h>
++#endif
++
+ namespace tflite {
+
+ const int kConvInputTensor = 0;
+@@ -200,6 +204,42 @@ TfLiteStatus ConvPrepare(TfLiteContext* context, TfLiteNode* node) {
+       context, node, params, input_width, input_height, filter_width,
+       filter_height, output_width, output_height, input->type, data));
+
++#ifdef CONFIG_TFLITEMICRO_ESP_NN
++  data->esp_nn_scratch_buffer_index = -1;
++  if (input->type == kTfLiteInt8 && filter->type == kTfLiteInt8 &&
++      params.dilation_width_factor == 1 &&
++      params.dilation_height_factor == 1)
++    {
++      const data_dims_t input_dims =
++        {
++          input_width, input_height, input->dims->data[3], 1
++        };
++      const data_dims_t filter_dims =
++        {
++          filter_width, filter_height, filter->dims->data[3], 0
++        };
++      const data_dims_t output_dims =
++        {
++          output_width, output_height, output->dims->data[3], 1
++        };
++      const conv_params_t conv_params =
++        {
++          0, 0,
++          {params.stride_width, params.stride_height},
++          {data->padding.width, data->padding.height},
++          {0, 0}, {-128, 127}
++        };
++      const int scratch_size = esp_nn_get_conv_scratch_size(
++        &input_dims, &filter_dims, &output_dims, &conv_params);
++
++      if (scratch_size > 0)
++        {
++          TF_LITE_ENSURE_STATUS(context->RequestScratchBufferInArena(
++            context, scratch_size, &data->esp_nn_scratch_buffer_index));
++        }
++    }
++#endif
++
+   if (filter->type == kTfLiteInt4) {
+     int filter_size =
+         RuntimeShape(filter->dims->size,
+diff --git a/tensorflow/lite/micro/kernels/depthwise_conv.cc b/tensorflow/lite/micro/kernels/depthwise_conv.cc
+index fa55a705..fc72658c 100644
+--- a/tensorflow/lite/micro/kernels/depthwise_conv.cc
++++ b/tensorflow/lite/micro/kernels/depthwise_conv.cc
+@@ -24,6 +24,10 @@ limitations under the License.
+ #include "tensorflow/lite/micro/kernels/kernel_util.h"
+ #include "tensorflow/lite/micro/micro_log.h"
+
++#ifdef CONFIG_TFLITEMICRO_ESP_NN
++#  include <esp_nn.h>
++#endif
++
+ namespace tflite {
+ namespace {
+
+@@ -33,6 +37,72 @@ void* DepthwiseConvInit(TfLiteContext* context, const char* buffer,
+   return context->AllocatePersistentBuffer(context, sizeof(OpDataConv));
+ }
+
++#ifdef CONFIG_TFLITEMICRO_ESP_NN
++void DepthwiseConvEvalEspNn(
++    TfLiteContext* context, const TfLiteDepthwiseConvParams& params,
++    const OpDataConv& data, const TfLiteEvalTensor* input,
++    const TfLiteEvalTensor* filter, const TfLiteEvalTensor* bias,
++    TfLiteEvalTensor* output)
++{
++  const RuntimeShape input_shape = tflite::micro::GetTensorShape(input);
++  const RuntimeShape filter_shape = tflite::micro::GetTensorShape(filter);
++  const RuntimeShape output_shape = tflite::micro::GetTensorShape(output);
++  const int input_height = input_shape.Dims(1);
++  const int input_width = input_shape.Dims(2);
++  const int input_depth = input_shape.Dims(3);
++  const int output_height = output_shape.Dims(1);
++  const int output_width = output_shape.Dims(2);
++  const int output_depth = output_shape.Dims(3);
++  const int batch_size = MatchingDim(input_shape, 0, output_shape, 0);
++
++  const data_dims_t input_dims =
++    {
++      input_width, input_height, input_depth, 1
++    };
++  const data_dims_t filter_dims =
++    {
++      filter_shape.Dims(2), filter_shape.Dims(1),
++      filter_shape.Dims(3), 0
++    };
++  const data_dims_t output_dims =
++    {
++      output_width, output_height, output_depth, 1
++    };
++  const dw_conv_params_t conv_params =
++    {
++      -data.input_zero_point, data.output_zero_point,
++      params.depth_multiplier,
++      {params.stride_width, params.stride_height},
++      {data.padding.width, data.padding.height},
++      {0, 0}, {data.output_activation_min, data.output_activation_max}
++    };
++  const quant_data_t quant_data =
++    {
++      data.per_channel_output_shift, data.per_channel_output_multiplier
++    };
++  void* scratch = data.esp_nn_scratch_buffer_index < 0 ? nullptr :
++                  context->GetScratchBuffer(
++                    context, data.esp_nn_scratch_buffer_index);
++
++
++  esp_nn_set_depthwise_conv_scratch_buf(scratch);
++  const int input_size = input_width * input_height * input_depth;
++  const int output_size = output_width * output_height * output_depth;
++  const int8_t* input_data = tflite::micro::GetTensorData<int8_t>(input);
++  int8_t* output_data = tflite::micro::GetTensorData<int8_t>(output);
++
++  for (int batch = 0; batch < batch_size; batch++)
++    {
++      esp_nn_depthwise_conv_s8(
++        &input_dims, input_data + batch * input_size,
++        &filter_dims, tflite::micro::GetTensorData<int8_t>(filter),
++        tflite::micro::GetOptionalTensorData<int32_t>(bias),
++        &output_dims, output_data + batch * output_size,
++        &conv_params, &quant_data);
++    }
++}
++#endif
++
+ TfLiteStatus DepthwiseConvEval(TfLiteContext* context, TfLiteNode* node) {
+   TFLITE_DCHECK(node->user_data != nullptr);
+   TFLITE_DCHECK(node->builtin_data != nullptr);
+@@ -88,6 +158,15 @@ TfLiteStatus DepthwiseConvEval(TfLiteContext* context, TfLiteNode* node) {
+           break;
+         }
+         case kTfLiteInt8: {
++#ifdef CONFIG_TFLITEMICRO_ESP_NN
++          if (params.dilation_width_factor == 1 &&
++              params.dilation_height_factor == 1)
++            {
++              DepthwiseConvEvalEspNn(context, params, data, input, filter,
++                                     bias, output);
++              break;
++            }
++#endif
+           reference_integer_ops::DepthwiseConvPerChannel(
+               DepthwiseConvParamsQuantized(params, data),
+               data.per_channel_output_multiplier, data.per_channel_output_shift,
+diff --git a/tensorflow/lite/micro/kernels/depthwise_conv_common.cc b/tensorflow/lite/micro/kernels/depthwise_conv_common.cc
+index 52804de3..8c6f3432 100644
+--- a/tensorflow/lite/micro/kernels/depthwise_conv_common.cc
++++ b/tensorflow/lite/micro/kernels/depthwise_conv_common.cc
+@@ -25,6 +25,10 @@ limitations under the License.
+ #include "tensorflow/lite/micro/kernels/depthwise_conv.h"
+ #include "tensorflow/lite/micro/kernels/kernel_util.h"
+
++#ifdef CONFIG_TFLITEMICRO_ESP_NN
++#  include <esp_nn.h>
++#endif
++
+ namespace tflite {
+
+ const int kDepthwiseConvInputTensor = 0;
+@@ -209,6 +213,42 @@ TfLiteStatus DepthwiseConvPrepare(TfLiteContext* context, TfLiteNode* node) {
+       context, node, params, input_width, input_height, filter_width,
+       filter_height, output_width, output_height, input->type, data));
+
++#ifdef CONFIG_TFLITEMICRO_ESP_NN
++  data->esp_nn_scratch_buffer_index = -1;
++  if (input->type == kTfLiteInt8 && filter->type == kTfLiteInt8 &&
++      params.dilation_width_factor == 1 &&
++      params.dilation_height_factor == 1)
++    {
++      const data_dims_t input_dims =
++        {
++          input_width, input_height, input->dims->data[3], 1
++        };
++      const data_dims_t filter_dims =
++        {
++          filter_width, filter_height, filter->dims->data[3], 0
++        };
++      const data_dims_t output_dims =
++        {
++          output_width, output_height, output->dims->data[3], 1
++        };
++      const dw_conv_params_t conv_params =
++        {
++          0, 0, params.depth_multiplier,
++          {params.stride_width, params.stride_height},
++          {data->padding.width, data->padding.height},
++          {0, 0}, {-128, 127}
++        };
++      const int scratch_size = esp_nn_get_depthwise_conv_scratch_size(
++        &input_dims, &filter_dims, &output_dims, &conv_params);
++
++      if (scratch_size > 0)
++        {
++          TF_LITE_ENSURE_STATUS(context->RequestScratchBufferInArena(
++            context, scratch_size, &data->esp_nn_scratch_buffer_index));
++        }
++    }
++#endif
++
+   micro_context->DeallocateTempTfLiteTensor(output);
+   micro_context->DeallocateTempTfLiteTensor(input);
+   micro_context->DeallocateTempTfLiteTensor(filter);
